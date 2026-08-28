@@ -1,9 +1,19 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import './App.css'
 
 const STORAGE_KEY = 'ai-chatbot-messages'
 const THEME_KEY = 'ai-chatbot-theme'
+
+// Backend base URL. Defaults to the local dev backend; override with
+// VITE_API_URL in frontend/.env(.local) for production.
+const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
+
+// Optional shared secret for the backend. When set (both here and on the
+// server via BACKEND_API_KEY), it is sent as "Authorization: Bearer <key>"
+// so an internet-facing backend can reject anonymous requests.
+const BACKEND_API_KEY = import.meta.env.VITE_BACKEND_API_KEY || ''
 
 function loadMessages() {
   try {
@@ -24,6 +34,22 @@ function saveMessages(messages) {
   } catch (e) {
     console.warn('Failed to save messages to localStorage:', e)
   }
+}
+
+// Mirror of the server-side leak cleanup, applied client-side so leaked
+// reasoning is also stripped from the CURRENT streamed response (the server
+// only cleans past turns before resending them to the model). Chosen over
+// buffering the SSE stream server-side because the client already accumulates
+// the full reply, so the same strip is a single function call at final render.
+function cleanReasoningLeak(content) {
+  const head = content.slice(0, 150)
+  if (head.includes('The user ') || head.includes('As an AI ')) {
+    const doctypeIdx = content.indexOf('<!DOCTYPE')
+    if (doctypeIdx !== -1) return content.slice(doctypeIdx)
+    const fenceIdx = content.indexOf('```')
+    if (fenceIdx !== -1) return content.slice(fenceIdx)
+  }
+  return content
 }
 
 function loadTheme() {
@@ -93,7 +119,11 @@ function MarkdownRenderer({ content, onCopy }) {
   const [html, setHtml] = useState('')
 
   useEffect(() => {
-    setHtml(marked.parse(content || ''))
+    // Sanitize the rendered markdown with DOMPurify before injecting it into
+    // the DOM. The model's output is untrusted, so without this any raw HTML
+    // it emits (e.g. <script>, event handlers) would execute in the page.
+    const rawHtml = marked.parse(content || '')
+    setHtml(DOMPurify.sanitize(rawHtml))
   }, [content])
 
   const copyCode = (code) => {
@@ -184,15 +214,13 @@ function App() {
     setTimeout(() => setGlobalError(''), 2000)
   }, [])
 
-  const handleSend = async (e) => {
-    e?.preventDefault()
-    if (!input.trim() || isLoading || !isOnline) return
-
-    const userMessage = input.trim()
-    const timestamp = Date.now()
-    const newMessages = [...messages, { role: 'user', content: userMessage, timestamp }]
-    setMessages(newMessages)
-    setInput('')
+  // sendConversation is the single path that starts a chat request. It accepts
+  // the full conversation (already including the new user message) and owns the
+  // fetch, streaming, and error handling. Both the form submit handler and the
+  // retry handler call it with the exact message list they want to send — this
+  // avoids the previous retry bug where setInput(...) then handleSend() relied
+  // on React state having flushed within the same tick.
+  const sendConversation = useCallback(async (conversation) => {
     setIsLoading(true)
     setGlobalError('')
 
@@ -202,14 +230,18 @@ function App() {
     }, 120000)
 
     try {
-      const response = await fetch('http://localhost:8000/chat/stream', {
+      const headers = { 'Content-Type': 'application/json' }
+      if (BACKEND_API_KEY) headers['Authorization'] = `Bearer ${BACKEND_API_KEY}`
+      const response = await fetch(`${API_URL}/chat/stream`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: newMessages, stream: true }),
+        headers,
+        body: JSON.stringify({ messages: conversation, stream: true }),
         signal: abortControllerRef.current.signal
       })
 
       clearTimeout(timeoutId)
+
+      setMessages(conversation)
 
       if (!response.ok) {
         const data = await response.json()
@@ -300,10 +332,13 @@ function App() {
         }
       }
 
+      // Strip any leaked reasoning preamble from the live (current) response
+      // before it is finalized and rendered to the user.
+      const finalContent = cleanReasoningLeak(assistantMessage)
       setMessages(prev => {
         const updated = [...prev]
         if (updated.length > 0 && updated[updated.length - 1].role === 'assistant') {
-          updated[updated.length - 1] = { role: 'assistant', content: assistantMessage, timestamp: assistantTimestamp, streaming: false, thinking: false, failed: false }
+          updated[updated.length - 1] = { role: 'assistant', content: finalContent, timestamp: assistantTimestamp, streaming: false, thinking: false, failed: false }
         }
         return updated
       })
@@ -335,6 +370,17 @@ function App() {
       setIsLoading(false)
       abortControllerRef.current = null
     }
+  }, [])
+
+  const handleSend = async (e) => {
+    e?.preventDefault()
+    if (!input.trim() || isLoading || !isOnline) return
+
+    const userMessage = input.trim()
+    const timestamp = Date.now()
+    const newMessages = [...messages, { role: 'user', content: userMessage, timestamp }]
+    setInput('')
+    await sendConversation(newMessages)
   }
 
   const handleRetry = useCallback((index) => {
@@ -345,11 +391,12 @@ function App() {
     const userMsgIndex = messages.findLastIndex((m, i) => i < index && m.role === 'user')
     if (userMsgIndex === -1) return
 
+    // Re-send the exact stored user message content by replicating the message
+    // list up to and including that user message — no dependence on the input
+    // state, which fixes the previous stale-closure retry bug.
     const conversationUpToUser = messages.slice(0, userMsgIndex + 1)
-    setMessages(conversationUpToUser)
-    setInput(messages[userMsgIndex].content)
-    handleSend(new Event('submit'))
-  }, [messages, isLoading, handleSend])
+    sendConversation(conversationUpToUser)
+  }, [messages, isLoading, sendConversation])
 
   const handleDismissError = useCallback((index) => {
     setMessages(prev => prev.map((m, i) => i === index ? { ...m, error: null } : m))

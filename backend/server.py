@@ -11,7 +11,18 @@ load_dotenv()
 OPENCODE_API_URL = "https://opencode.ai/inference/openai/v1/chat/completions"
 OPENCODE_API_KEY = os.getenv("OPENCODE_API_KEY")
 
-ALLOWED_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
+# OPTIONAL shared secret for protecting an internet-facing backend. When set,
+# /chat and /chat/stream require "Authorization: Bearer <key>". Unset (empty)
+# for local/personal use disables the check.
+BACKEND_API_KEY = os.getenv("BACKEND_API_KEY", "").strip()
+
+DEFAULT_ALLOWED_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
+# Extend the allowlist at deploy time without editing code.
+# Comma-separated list, e.g. ALLOWED_ORIGINS=https://myapp.com,https://www.myapp.com
+ALLOWED_ORIGINS = DEFAULT_ALLOWED_ORIGINS + [
+    o.strip() for o in os.getenv("ALLOWED_ORIGINS", "").split(",") if o.strip()
+]
+
 MAX_HISTORY = 20
 MAX_RETRIES = 2
 RETRY_BASE_DELAY = 0.5
@@ -73,11 +84,20 @@ def validate_messages(messages):
 
 class ChatHandler(BaseHTTPRequestHandler):
     def _get_origin(self):
+        # Only return the request's Origin if it is explicitly allowlisted.
+        # Returns None for any other (or missing) origin so the response is
+        # sent WITHOUT permissive CORS headers, blocking cross-site calls with
+        # credentials. No wildcard fallback: credentials must never be echoed
+        # back to an unverified origin.
         origin = self.headers.get("Origin", "")
-        return origin if origin else "*"
+        if origin in ALLOWED_ORIGINS:
+            return origin
+        return None
 
     def _send_cors_headers(self):
         origin = self._get_origin()
+        if not origin:
+            return
         self.send_header("Access-Control-Allow-Origin", origin)
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
@@ -95,13 +115,24 @@ class ChatHandler(BaseHTTPRequestHandler):
         else:
             self.send_error(404)
 
+    def _is_authorized(self):
+        # When a shared secret is configured, require a matching
+        # "Authorization: Bearer <key>" header so random internet traffic
+        # cannot consume the backend's bandwidth/compute.
+        if not BACKEND_API_KEY:
+            return True
+        auth = self.headers.get("Authorization", "")
+        _, _, token = auth.partition(" ")
+        return token == BACKEND_API_KEY
+
     def do_POST(self):
         try:
             parsed_path = urlparse(self.path)
-            if parsed_path.path == "/chat":
-                self.handle_chat(stream=False)
-            elif parsed_path.path == "/chat/stream":
-                self.handle_chat(stream=True)
+            if parsed_path.path in ("/chat", "/chat/stream"):
+                if not self._is_authorized():
+                    self.send_json_response(401, {"detail": "Unauthorized"})
+                    return
+                self.handle_chat(stream=(parsed_path.path == "/chat/stream"))
             else:
                 self.send_error(404)
         except Exception as e:
@@ -274,6 +305,8 @@ class ReusableThreadingServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
 if __name__ == "__main__":
-    server = ReusableThreadingServer(("0.0.0.0", 8000), ChatHandler)
-    print("Backend server running on http://localhost:8000")
+    # Bind address is overridable so the backend can sit behind a reverse proxy.
+    port = int(os.getenv("PORT", "8000"))
+    server = ReusableThreadingServer(("0.0.0.0", port), ChatHandler)
+    print(f"Backend server running on http://0.0.0.0:{port}")
     server.serve_forever()
