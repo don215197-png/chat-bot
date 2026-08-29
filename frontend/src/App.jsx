@@ -38,6 +38,80 @@ const SUGGESTED_PROMPTS = [
 // VITE_API_URL in frontend/.env(.local) for production.
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000'
 
+// Minimal inline SVG icon set (Feather-style, 24x24, stroke = currentColor so
+// icons inherit the surrounding button/theme color). Replaces emoji glyphs for
+// crisp, theme-consistent UI.
+function Icon({ name, size = 16, className = '' }) {
+  const paths = {
+    bot: (
+      <>
+        <rect x="3" y="11" width="18" height="10" rx="2" />
+        <circle cx="12" cy="5" r="2" />
+        <path d="M12 7v4" />
+        <line x1="8" y1="16" x2="8" y2="16" />
+        <line x1="16" y1="16" x2="16" y2="16" />
+      </>
+    ),
+    menu: (
+      <>
+        <line x1="3" y1="6" x2="21" y2="6" />
+        <line x1="3" y1="12" x2="21" y2="12" />
+        <line x1="3" y1="18" x2="21" y2="18" />
+      </>
+    ),
+    sun: (
+      <>
+        <circle cx="12" cy="12" r="5" />
+        <line x1="12" y1="1" x2="12" y2="3" />
+        <line x1="12" y1="21" x2="12" y2="23" />
+        <line x1="4.22" y1="4.22" x2="5.64" y2="5.64" />
+        <line x1="18.36" y1="18.36" x2="19.78" y2="19.78" />
+        <line x1="1" y1="12" x2="3" y2="12" />
+        <line x1="21" y1="12" x2="23" y2="12" />
+        <line x1="4.22" y1="19.78" x2="5.64" y2="18.36" />
+        <line x1="18.36" y1="5.64" x2="19.78" y2="4.22" />
+      </>
+    ),
+    moon: <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />,
+    pencil: <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />,
+    trash: (
+      <>
+        <polyline points="3 6 5 6 21 6" />
+        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+        <line x1="10" y1="11" x2="10" y2="17" />
+        <line x1="14" y1="11" x2="14" y2="17" />
+      </>
+    ),
+    'wifi-off': (
+      <>
+        <line x1="1" y1="1" x2="23" y2="23" />
+        <path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55" />
+        <path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39" />
+        <path d="M10.71 5.05A16 16 0 0 1 22.58 9" />
+        <path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88" />
+        <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
+        <line x1="12" y1="20" x2="12.01" y2="20" />
+      </>
+    ),
+  }
+  return (
+    <svg
+      className={className}
+      width={size}
+      height={size}
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      {paths[name]}
+    </svg>
+  )
+}
+
 // Small unique id generator for conversations. crypto.randomUUID is used when
 // available (secure contexts); the fallback covers non-secure origins.
 function makeId() {
@@ -435,7 +509,7 @@ function TextareaInput({ value, onChange, onSend, disabled, placeholder, inputRe
 function WelcomeScreen({ onPick }) {
   return (
     <div className="welcome">
-      <div className="welcome-icon" aria-hidden="true">🤖</div>
+      <div className="welcome-icon" aria-hidden="true"><Icon name="bot" size={48} /></div>
       <h2 className="welcome-title">Hi, I'm your AI assistant</h2>
       <p className="welcome-subtitle">Ask me anything — code, concepts, debugging, writing.</p>
       <div className="suggestion-chips">
@@ -489,7 +563,7 @@ function AuthScreen({ onAuth }) {
   return (
     <div className="auth-screen" data-theme="dark">
       <div className="auth-card">
-        <div className="auth-icon" aria-hidden="true">🤖</div>
+        <div className="auth-icon" aria-hidden="true"><Icon name="bot" size={40} /></div>
         <h2 className="auth-title">{mode === 'login' ? 'Welcome back' : 'Create an account'}</h2>
         <p className="auth-subtitle">
           {mode === 'login'
@@ -1237,7 +1311,7 @@ function App() {
             aria-label="Toggle conversation list"
             aria-expanded={sidebarOpen}
           >
-            ☰
+            <Icon name="menu" size={20} />
           </button>
           <div className="header-content">
             <h1>
@@ -1260,7 +1334,7 @@ function App() {
             Log out
           </button>
           <button type="button" className="theme-toggle" onClick={toggleTheme} aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}>
-            {theme === 'dark' ? '☀️' : '🌙'}
+            <Icon name={theme === 'dark' ? 'sun' : 'moon'} size={18} />
           </button>
         </div>
       </header>
@@ -1310,14 +1384,14 @@ function App() {
                     )}
                     {!isRenaming && (
                       <div className="sidebar-conv-actions">
-                        <button type="button" className="sidebar-icon-btn" onClick={() => handleStartRename(c)} aria-label="Rename conversation">✏️</button>
+                        <button type="button" className="sidebar-icon-btn" onClick={() => handleStartRename(c)} aria-label="Rename conversation"><Icon name="pencil" size={14} /></button>
                         <button
                           type="button"
                           className={`sidebar-icon-btn delete ${isConfirming ? 'confirming' : ''}`}
                           onClick={() => handleDeleteConversation(c.id)}
                           aria-label={isConfirming ? 'Confirm delete conversation' : 'Delete conversation'}
                         >
-                          {isConfirming ? 'Sure?' : '🗑️'}
+                          {isConfirming ? 'Sure?' : <Icon name="trash" size={14} />}
                         </button>
                       </div>
                     )}
@@ -1361,7 +1435,7 @@ function App() {
                           onClick={() => deleteSite(site)}
                           aria-label={`Delete site ${site.id}`}
                         >
-                          🗑️
+                          <Icon name="trash" size={14} />
                         </button>
                       </li>
                     ))}
@@ -1375,7 +1449,8 @@ function App() {
         <main className="chat-container">
           {!isOnline && (
             <div className="offline-banner" role="alert">
-              📴 You're offline — messages will send when connection restores
+              <span className="offline-banner-icon"><Icon name="wifi-off" size={16} /></span>
+              You're offline — messages will send when connection restores
             </div>
           )}
 

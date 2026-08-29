@@ -80,10 +80,13 @@ non-obvious choice below is explained in the code as well; this is the summary.
   that stored message (only if the message belongs to the same user), so the
   "Published ✓" state survives reloads.
 - **SQLite for storage.** Single-writer semantics, zero configuration, real
-  files. Concurrent writes are serialized by SQLite's own locking with short
-  transactions. This is consciously sized for a single-instance app; multi-user
-  production routing means a move to Postgres + a connection pool (data access is
-  isolated in `database.py`, so the blast radius of that change is contained).
+  files. Contention is mitigated with `PRAGMA journal_mode=WAL` (readers no
+  longer block a writer) and `PRAGMA busy_timeout=5000` (a write hitting a brief
+  lock waits up to 5s and retries instead of failing with "database is locked").
+  This is consciously sized for a single-instance app; for multi-instance
+  production routing the right move is still Postgres + a connection pool —
+  data access is isolated in `database.py`, so the blast radius of that change
+  is contained.
 
 ## Project Structure
 
