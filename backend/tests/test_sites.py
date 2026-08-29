@@ -158,3 +158,22 @@ def test_publish_ignores_message_id_from_other_user(api, server_url):
     message = alice.request("GET", f"/conversations/{conv['id']}/messages").json()["messages"]
     updated = next(m for m in message if m["id"] == assistant["id"])
     assert updated["published_url"] is None
+
+
+def test_path_traversal_rejected(api):
+    # site_ids are bound by a strict charset regex before they ever become a
+    # filesystem path, so traversal and path-separator attempts must 404 — never
+    # resolve to a file, never echo a built-in or leaked path.
+    attempts = [
+        "/sites/../etc/passwd",
+        "/sites/../../../../etc/passwd",
+        "/sites/..%2f..%2f..%2fetc%2fpasswd",
+        "/sites/%2e%2e/%2e%2e/etc/passwd",
+        "/sites/foo.html",
+        "/sites/foo/",
+        "/sites/",
+    ]
+    for attempt in attempts:
+        res = api.request("GET", attempt)
+        assert res.status_code == 404, f"{attempt} -> {res.status_code}"
+        assert "passwd" not in res.text

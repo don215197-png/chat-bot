@@ -66,6 +66,22 @@ def test_password_storage_is_hashed():
     assert hashed.startswith("pbkdf2_sha256$")
 
 
+def test_password_hash_roundtrip():
+    # A correct password verifies; a wrong one does not, even when it differs
+    # by a single character. Salts are random, so the same password hashes to a
+    # different value each time.
+    stored = server_hash_password("s3cret!")
+    assert server_verify_password("s3cret!", stored)
+    assert not server_verify_password("wrong", stored)
+    assert not server_verify_password("secRet!", stored)
+    assert server_hash_password("s3cret!") != stored
+
+
+def server_verify_password(password, stored):
+    import server
+    return server.verify_password(password, stored)
+
+
 def server_hash_password(password):
     # Pulled through server's own implementation to assert format/hashing.
     import server

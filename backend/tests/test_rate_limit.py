@@ -21,6 +21,19 @@ def test_chat_burst_is_rate_limited(api, monkeypatch):
     assert body["retry_after"] is not None
 
 
+def test_chat_burst_boundary(api, monkeypatch):
+    # Boundary behaviour: exactly CHAT_MAX_REQUESTS are allowed, the next one
+    # in the same window is rejected. Guards against off-by-one limiter bugs
+    # that would either throttle too early or never throttle at all.
+    monkeypatch.setattr(server_module, "request_with_retry",
+                        lambda func, *a, **k: (_Fake(), None))
+    api.register("boundary@example.com", "password123")
+    payload = {"messages": [{"role": "user", "content": "hi"}]}
+    for _ in range(server_module.CHAT_MAX_REQUESTS):
+        assert api.request("POST", "/chat", payload).status_code == 200
+    assert api.request("POST", "/chat", payload).status_code == 429
+
+
 def test_publish_uses_separate_bucket(api):
     # Filling the chat bucket must not starve the publish endpoint: separate
     # windows/limits per action type.

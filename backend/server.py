@@ -5,6 +5,7 @@ import re
 import secrets
 import hashlib
 import hmac
+import logging
 import threading
 import time
 from collections import defaultdict, deque
@@ -16,6 +17,8 @@ from dotenv import load_dotenv
 import database
 
 load_dotenv()
+
+logger = logging.getLogger("chatbot.backend")
 
 OPENCODE_API_URL = "https://opencode.ai/inference/openai/v1/chat/completions"
 OPENCODE_API_KEY = os.getenv("OPENCODE_API_KEY")
@@ -865,7 +868,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         self.wfile.flush()
 
     def log_message(self, format, *args):
-        print(f"{self.address_string()} - {format % args}")
+        logger.info("%s - %s", self.address_string(), format % args)
 
 class ReusableThreadingServer(ThreadingHTTPServer):
     allow_reuse_address = True
@@ -879,5 +882,9 @@ if __name__ == "__main__":
     # Bind address is overridable so the backend can sit behind a reverse proxy.
     port = int(os.getenv("PORT", "8000"))
     server = ReusableThreadingServer(("0.0.0.0", port), ChatHandler)
-    print(f"Backend server running on http://0.0.0.0:{port}")
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    logger.info("Backend server running on http://0.0.0.0:%s", port)
     server.serve_forever()

@@ -16,6 +16,75 @@ React Frontend (Vite) → POST /auth/login → Python Backend (http.server) → 
 - **Model**: hy3-free
 - **Communication**: REST API with JSON, SSE streaming for `/chat/stream`
 
+## Architecture & Security Decisions
+
+This project deliberately trades framework velocity for understanding. Every
+non-obvious choice below is explained in the code as well; this is the summary.
+
+- **Raw `http.server` instead of a framework (Flask/FastAPI).** The backend is a
+  hand-rolled `ThreadingHTTPServer` handler — routing, body parsing, CORS,
+  streaming, and validation are all explicit Python. That is the point: it shows
+  how HTTP actually works end-to-end (request line → headers → body → response,
+  plus SSE framing) with zero framework dependencies. **Trade-off:** we hand-
+  maintain what Django/Starlette give for free, so there is less at-the-keyboard
+  velocity, and correctness relies on the test suite. It also makes the switch
+  to a framework (a FastAPI v2 port is a natural next step) a demonstration of
+  fluency rather than a mystery.
+- **CORS echoes only the allowlisted origin.** The server never returns
+  `Access-Control-Allow-Origin: *` because credentialed requests must not be
+  echoed back to an unverified origin. The `Origin` header is matched against an
+  explicit allowlist (dev origins always; prod via `ALLOWED_ORIGINS`); anything
+  else gets **no** CORS headers at all.
+- **Sessions are DB-backed, not stateless JWTs.** A login inserts a random
+  32-hex-char token into the `sessions` table with an expiry. **Why not JWT:**
+  server-side sessions are immediately revocable (logout is a row delete), need
+  no signing-key management, and can't be replayed after logout. **Trade-off:**
+  one indexed DB read per request — fine for a single SQLite instance, and the
+  main thing to revisit (Redist/db cache) if you scale out.
+- **Passwords: PBKDF2-SHA256, 200k iterations, per-user random salt.** The salt
+  and work factor live inside the stored string (`pbkdf2_sha256$iters$salt$hash`),
+  so the format is self-describing and the factor can be raised later without a
+  schema change. Implemented with only `hashlib` — no extra dependency, and a
+  unit test pins the round-trip and salt uniqueness.
+- **Per-IP in-memory rate limiting** (sliding window + daily cap) on the chat and
+  publish routes, returning `429` + `Retry-After`. **Known trade-off (deliberate,
+  not an accident):** buckets live in process memory — a restart resets them and
+  multiple workers share nothing, so it is not a defensive wall on a large
+  deployment. That is acceptable for a single-instance demo; scaling horizontally
+  means moving the buckets to Redis (the interface is already isolated enough to
+  swap). `TRUST_PROXY_HEADERS` (reading `X-Forwarded-For`) is off by default
+  because trusting it without a proxy that strips the header lets clients spoof
+  their IP and dodge the limiter.
+- **IDOR is prevented in the database, not the client.** Every per-user read is a
+  SQL `WHERE user_id = ?` including the id in the WHERE clause — a conversation or
+  site from another account is simply not fetched (404), even when the attacker
+  guesses a valid id. Ownership checks are never "filter out rows the client
+  didn't ask for".
+- **Path traversal is blocked before filesystem access.** Site ids must match
+  `^[A-Za-z0-9_-]{1,64}$` before they are ever joined onto the site directory, so
+  `..`, `/`, `%2e%2e` and friends resolve to nothing at all. The public tests
+  assert traversal attempts return 404.
+- **Published sites are sandboxed, not sanitized.** The page the model generated
+  is inherently untrusted UI/JS. Trying to sanitize it to "safe HTML" is a
+  whack-a-mole against arbitrary JavaScript and layout tricks; instead the raw
+  file is served with a `Content-Security-Policy: sandbox allow-scripts
+  allow-forms` (plus `nosniff`), so even opened directly it runs without
+  same-origin privileges. Sandboxing is the honest boundary; sanitizing only-side
+  would be false confidence.
+- **The frontend is stateless about history.** The browser holds only
+  `{ token, email }` (a personal secret — treat it like a cookie). Conversations,
+  messages, and published-site links all live server-side, so history survives
+  logout → login and is naturally per-account.
+- **Publish attribution ties sites to exact replies.** The stream's final SSE
+  frame carries `assistant_message_id`; a later publish stores its URL back on
+  that stored message (only if the message belongs to the same user), so the
+  "Published ✓" state survives reloads.
+- **SQLite for storage.** Single-writer semantics, zero configuration, real
+  files. Concurrent writes are serialized by SQLite's own locking with short
+  transactions. This is consciously sized for a single-instance app; multi-user
+  production routing means a move to Postgres + a connection pool (data access is
+  isolated in `database.py`, so the blast radius of that change is contained).
+
 ## Project Structure
 
 ```
@@ -48,8 +117,14 @@ React Frontend (Vite) → POST /auth/login → Python Backend (http.server) → 
 
 ```bash
 cd backend
+python3 -m venv venv                 # Windows: python -m venv venv
+source venv/bin/activate             # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
+
+`requirements.txt` has only three packages — `requests`, `python-dotenv`, and
+`pytest` — because the server itself is stdlib-only (`http.server` + `sqlite3`).
+The `venv/` directory is gitignored. To leave the virtualenv later, run `deactivate`.
 
 ### Frontend
 
@@ -125,7 +200,10 @@ cd backend
 python server.py
 ```
 
-Server runs on `http://localhost:8000` (or the `PORT` you set).
+You should see `Backend server running on http://0.0.0.0:8000`. First run
+creates `chatbot.db` (SQLite) and `generated_sites/` automatically
+(`database.init_db()`). Verify it's alive at http://localhost:8000/health →
+`{"status": "ok"}`.
 
 ### Start Frontend (Terminal 2)
 
@@ -296,7 +374,7 @@ constants in `backend/server.py`. The directory is gitignored.
 - ✅ Per-IP rate limiting on chat and publish routes (`429` + `Retry-After`, sliding window + daily cap)
 - ✅ **My Sites** panel: list, open, and unpublish the sites you published (account-owned)
 - ✅ 7-day retention + 2 MB size cap on published sites
-- ✅ `pytest` suite covering auth, conversation ownership, chat persistence/replay, sites, and rate limiting
+- ✅ `pytest` suite covering auth, conversation ownership, chat persistence/replay, sites, rate-limiting boundaries, and security paths (traversal, password round-trip, IDOR)
 
 ## Error Handling
 
@@ -336,7 +414,7 @@ and published sites all require the session token.
 
 ```bash
 cd backend
-python -m pytest -q   # 34 tests: auth, conversations, chat persistence/replay, sites, rate limits
+python -m pytest -q   # 37 tests: auth, conversations, chat persistence/replay, sites, rate limits, security paths
 ```
 
 The suite spins up a real `http.server` on an ephemeral port and uses a scratch
