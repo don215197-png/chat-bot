@@ -22,6 +22,15 @@
   --offline-bg: #3a2a0a;
   --offline-text: #fbbf24;
   --code-bg: #1e1e1e;
+  --code-text: #d4d4d4;
+  --code-keyword: #c792ea;
+  --code-string: #c3e88d;
+  --code-number: #f78c6c;
+  --code-comment: #7b8496;
+  --code-title: #82aaff;
+  --code-attr: #ffcb6b;
+  --code-meta: #89ddff;
+  --code-variable: #82aaff;
   --scrollbar-track: #1a1a2e;
   --scrollbar-thumb: #3a3a5a;
 }
@@ -44,6 +53,15 @@
   --offline-bg: #fff8e1;
   --offline-text: #f59f00;
   --code-bg: #f4f4f4;
+  --code-text: #24292e;
+  --code-keyword: #7b2fbf;
+  --code-string: #137c2e;
+  --code-number: #b4653a;
+  --code-comment: #8a9199;
+  --code-title: #0b6fcb;
+  --code-attr: #8a6d1f;
+  --code-meta: #2f7fb5;
+  --code-variable: #0b6fcb;
   --scrollbar-track: #f1f1f1;
   --scrollbar-thumb: #c1c1c1;
 }
@@ -60,7 +78,7 @@ body {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
-  max-width: 900px;
+  max-width: 1100px;
   margin: 0 auto;
   padding: 20px;
 }
@@ -106,12 +124,470 @@ body {
   transform: scale(1.05);
 }
 
+.header-title-group {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1;
+  min-width: 0;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.account-chip {
+  max-width: 240px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+
+.account-email {
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+  display: block;
+}
+
+.logout-button {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  cursor: pointer;
+  transition: background 0.2s, border-color 0.2s;
+}
+
+.logout-button:hover {
+  background: var(--border);
+  border-color: var(--text-secondary);
+}
+
+/* Full-screen login / signup gate shown when no session is present. */
+.auth-screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg-primary);
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 400px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  padding: 32px;
+  text-align: center;
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
+}
+
+.auth-icon {
+  font-size: 2.5rem;
+  margin-bottom: 12px;
+}
+
+.auth-title {
+  font-size: 1.5rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin-bottom: 6px;
+}
+
+.auth-subtitle {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  margin-bottom: 24px;
+}
+
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  text-align: left;
+}
+
+.auth-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+}
+
+.auth-field input {
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  font-size: 0.95rem;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.auth-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.auth-error {
+  color: #e5484d;
+  font-size: 0.85rem;
+  margin: 0;
+}
+
+.auth-submit {
+  margin-top: 6px;
+  padding: 11px 16px;
+  border-radius: 8px;
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.95rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: filter 0.2s;
+}
+
+.auth-submit:hover:not(:disabled) {
+  filter: brightness(1.1);
+}
+
+.auth-submit:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.auth-switch {
+  margin-top: 18px;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 0.85rem;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.auth-switch:hover {
+  color: var(--text-primary);
+}
+
+/* Hamburger that reveals the conversation sidebar. Hidden on desktop where the
+   sidebar is always visible; shown on small screens where it becomes a drawer. */
+.sidebar-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  flex-shrink: 0;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--text-primary);
+  font-size: 1.1rem;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.sidebar-toggle:hover {
+  background: var(--border);
+}
+
+/* Two-column body: conversation sidebar + chat pane. The chat pane is
+   flex-sized inside this row instead of using a fixed viewport height, so the
+   sidebar scrolls independently of the messages. */
+.app-body {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  width: 260px;
+  flex-shrink: 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  margin-right: 16px;
+  padding: 12px;
+  overflow-y: auto;
+}
+
+.sidebar-new-chat {
+  width: 100%;
+  padding: 10px 12px;
+  margin-bottom: 10px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.sidebar-new-chat:hover {
+  background: var(--accent-hover);
+}
+
+.sidebar-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sidebar-empty {
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  text-align: center;
+  padding: 16px 0;
+}
+
+.sidebar-conv {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  transition: background 0.15s;
+}
+
+.sidebar-conv:hover {
+  background: var(--bg-tertiary);
+}
+
+.sidebar-conv.active {
+  background: var(--bg-tertiary);
+}
+
+.sidebar-conv.active .sidebar-conv-title {
+  color: var(--accent);
+}
+
+.sidebar-conv-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  background: none;
+  border: none;
+  padding: 2px 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.sidebar-conv-title {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+.sidebar-conv-time {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+}
+
+.sidebar-conv-actions {
+  display: none;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.sidebar-conv:hover .sidebar-conv-actions,
+.sidebar-conv:focus-within .sidebar-conv-actions {
+  display: flex;
+}
+
+.sidebar-icon-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 0.8rem;
+  padding: 4px 6px;
+  border-radius: 6px;
+  color: var(--text-secondary);
+  transition: background 0.15s, color 0.15s;
+}
+
+.sidebar-icon-btn:hover {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.sidebar-icon-btn.delete:hover {
+  color: var(--error-text);
+}
+
+.sidebar-icon-btn.delete.confirming {
+  color: var(--error-text);
+  border: 1px solid var(--error-text);
+  font-size: 0.7rem;
+}
+
+.sidebar-rename-input {
+  flex: 1;
+  min-width: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.85rem;
+  outline: none;
+}
+
+.sidebar-backdrop {
+  display: none;
+}
+
+/* ===== My Sites management panel (sidebar) ===============================
+   Lists this publisher's own published sites (newest first) with an inline
+   delete. Lives under the conversation list so it needs no separate page. */
+.sidebar-sites {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 12px;
+  border-top: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+  padding-top: 10px;
+}
+
+.sidebar-sites-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 6px 8px;
+  border-radius: 8px;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  transition: background 0.15s, color 0.15s;
+}
+
+.sidebar-sites-toggle:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.sidebar-sites-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-sites-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-sites-item {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  transition: background 0.15s;
+}
+
+.sidebar-sites-item:hover {
+  background: var(--bg-tertiary);
+}
+
+.sidebar-sites-link {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  color: inherit;
+  text-decoration: none;
+}
+
+.sidebar-sites-title {
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sidebar-sites-link:hover .sidebar-sites-title {
+  color: var(--accent);
+}
+
+.sidebar-sites-sub {
+  font-size: 0.7rem;
+  color: var(--text-secondary);
+}
+
+.sidebar-sites-error {
+  color: var(--error-text);
+  font-size: 0.8rem;
+  text-align: center;
+  padding: 8px 0;
+}
+
+/* Connection status dot in the header — visible at a glance, independent of
+   the offline banner. Green = online, red/amber = offline. */
+.status-dot {
+  display: inline-block;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  margin-left: 8px;
+  vertical-align: middle;
+  transition: background 0.3s, box-shadow 0.3s;
+}
+
+.status-dot.online {
+  background: var(--success-text);
+  box-shadow: 0 0 0 3px rgba(74, 222, 128, 0.15);
+}
+
+.status-dot.offline {
+  background: var(--offline-text);
+  box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.15);
+}
+
 .chat-container {
   display: flex;
   flex-direction: column;
   flex: 1;
-  height: calc(100vh - 200px);
+  min-width: 0;
   min-height: 400px;
+  position: relative;
 }
 
 .offline-banner {
@@ -149,6 +625,85 @@ body {
 .messages::-webkit-scrollbar-thumb {
   background: var(--scrollbar-thumb);
   border-radius: 4px;
+}
+
+/* Empty-state welcome screen */
+.welcome {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px;
+  gap: 12px;
+}
+
+.welcome-icon {
+  font-size: 3rem;
+  opacity: 0.9;
+}
+
+.welcome-title {
+  font-size: 1.6rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.welcome-subtitle {
+  color: var(--text-secondary);
+  font-size: 0.95rem;
+  max-width: 420px;
+}
+
+.suggestion-chips {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 8px;
+  max-width: 460px;
+}
+
+.suggestion-chip {
+  padding: 8px 14px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: border-color 0.2s, color 0.2s, background 0.2s;
+}
+
+.suggestion-chip:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+  background: var(--bg-tertiary);
+}
+
+/* Floating "jump to newest" button shown while scrolled up mid-stream */
+.scroll-bottom-btn {
+  position: absolute;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 96px;
+  z-index: 5;
+  padding: 8px 16px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 20px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+  animation: slideDown 0.25s ease-out;
+  transition: background 0.2s;
+}
+
+.scroll-bottom-btn:hover {
+  background: var(--accent-hover);
 }
 
 .message {
@@ -235,6 +790,82 @@ body {
   color: white;
 }
 
+/* The most recent user message is clickable to edit & resend. A plain-text
+   button so the bubble looks identical until hover reveals the affordance. */
+.user-text-btn {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  border-radius: 8px;
+}
+
+.user-text-btn:hover .user-text {
+  text-decoration: underline;
+  text-decoration-style: dotted;
+  text-underline-offset: 3px;
+  text-decoration-color: rgba(255, 255, 255, 0.8);
+}
+
+.edit-box {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.edit-input {
+  width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  font-family: inherit;
+  resize: vertical;
+  outline: none;
+  min-height: 60px;
+}
+
+.edit-input:focus {
+  box-shadow: 0 0 0 3px rgba(79, 140, 255, 0.2);
+}
+
+.edit-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.edit-cancel {
+  padding: 6px 12px;
+  background: transparent;
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+}
+
+.edit-cancel:hover {
+  color: var(--text-primary);
+  border-color: var(--text-secondary);
+}
+
+.edit-resend {
+  margin-top: 0;
+  align-self: auto;
+}
+
+.edit-resend:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 .markdown-content {
   color: var(--text-primary);
 }
@@ -282,6 +913,65 @@ body {
   padding: 0;
   font-size: 0.8rem;
   line-height: 1.5;
+}
+
+/* Lightweight highlight.js token palette — driven by CSS variables so it
+   follows the app's dark/light theme without bundling theme stylesheets. */
+.markdown-content .hljs {
+  color: var(--code-text);
+  background: transparent;
+}
+
+.markdown-content .hljs-keyword,
+.markdown-content .hljs-selector-tag {
+  color: var(--code-keyword);
+}
+
+.markdown-content .hljs-string,
+.markdown-content .hljs-regexp,
+.markdown-content .hljs-addition {
+  color: var(--code-string);
+}
+
+.markdown-content .hljs-number,
+.markdown-content .hljs-literal,
+.markdown-content .hljs-symbol,
+.markdown-content .hljs-bullet {
+  color: var(--code-number);
+}
+
+.markdown-content .hljs-comment,
+.markdown-content .hljs-quote,
+.markdown-content .hljs-deletion {
+  color: var(--code-comment);
+  font-style: italic;
+}
+
+.markdown-content .hljs-title,
+.markdown-content .hljs-title.function_,
+.markdown-content .hljs-built_in,
+.markdown-content .hljs-section,
+.markdown-content .hljs-name {
+  color: var(--code-title);
+}
+
+.markdown-content .hljs-attr,
+.markdown-content .hljs-attribute,
+.markdown-content .hljs-selector-attr,
+.markdown-content .hljs-selector-class,
+.markdown-content .hljs-parameter,
+.markdown-content .hljs-variable,
+.markdown-content .hljs-template-variable {
+  color: var(--code-attr);
+}
+
+.markdown-content .hljs-meta,
+.markdown-content .hljs-selector-id,
+.markdown-content .hljs-tag,
+.markdown-content .hljs-doctag,
+.markdown-content .hljs-type,
+.markdown-content .hljs-subst {
+  color: var(--code-meta);
 }
 
 .copy-code-btn {
@@ -448,6 +1138,34 @@ body {
   animation: slideDown 0.3s ease-out;
 }
 
+/* Success toast — visually distinct from the error banner (never reuses it). */
+.toast {
+  position: fixed;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: 24px;
+  z-index: 20;
+  padding: 10px 18px;
+  background: var(--success-bg);
+  color: var(--success-text);
+  border: 1px solid rgba(74, 222, 128, 0.4);
+  border-radius: 8px;
+  font-size: 0.85rem;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.2);
+  animation: slideUp 0.25s ease-out;
+}
+
+@keyframes slideUp {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 8px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
 @keyframes slideDown {
   from {
     opacity: 0;
@@ -546,11 +1264,76 @@ body {
   background: var(--error-bg);
 }
 
+.clear-button.confirming {
+  color: var(--error-text);
+  border-color: var(--error-text);
+  background: var(--error-bg);
+  animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
 @media (max-width: 600px) {
   .app {
     padding: 10px;
   }
-  
+
+  .header-title-group {
+    gap: 8px;
+  }
+
+  .sidebar-toggle {
+    display: flex;
+  }
+
+  /* Sidebar becomes a slide-in drawer behind the hamburger, with a backdrop
+     overlay that closes it on tap. The chat pane keeps its full width. */
+  .sidebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 40;
+    width: min(280px, 80vw);
+    margin: 0;
+    border-radius: 0;
+    border-right: 1px solid var(--border);
+    border-top: none;
+    border-bottom: none;
+    border-left: none;
+    transform: translateX(-100%);
+    transition: transform 0.25s ease-out;
+  }
+
+  .app-body.sidebar-open .sidebar {
+    transform: translateX(0);
+    box-shadow: 4px 0 24px rgba(0, 0, 0, 0.35);
+  }
+
+  .app-body.sidebar-open .sidebar-backdrop {
+    display: block;
+  }
+
+  .sidebar-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 35;
+    background: rgba(0, 0, 0, 0.45);
+  }
+
+  /* Touch devices can't hover, so conversation actions stay visible. */
+  .sidebar-conv-actions {
+    display: flex;
+  }
+
+  .header {
+    flex-direction: column;
+    gap: 12px;
+  }
+
   .message {
     max-width: 95%;
   }
@@ -563,13 +1346,243 @@ body {
     width: 100%;
   }
   
-  .header {
-    flex-direction: column;
-    gap: 12px;
-  }
-  
   .markdown-content pre {
     padding: 8px;
     font-size: 0.75rem;
+  }
+
+  .scroll-bottom-btn {
+    bottom: 116px;
+  }
+
+  .welcome {
+    padding: 16px;
+  }
+
+  .welcome-title {
+    font-size: 1.35rem;
+  }
+
+  .edit-input {
+    font-size: 0.85rem;
+  }
+
+  .toast {
+    bottom: 16px;
+  }
+}
+
+/* ===== Generated site preview / Code / Publish =============================
+   Card shown under assistant messages that contain a ```html block. The card
+   is inert by default: Preview/Code tabs only reveal content on demand, and
+   Publish only ever fires on an explicit click. */
+
+.site-card {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--bg-secondary);
+}
+
+.site-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-tertiary);
+}
+
+.site-tab {
+  padding: 6px 16px;
+  border-radius: 7px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: color 0.2s, background 0.2s, border-color 0.2s;
+}
+
+.site-tab:hover {
+  color: var(--text-primary);
+}
+
+.site-tab.active {
+  color: var(--accent);
+  background: var(--bg-secondary);
+  border-color: var(--border);
+}
+
+.site-preview-frame {
+  display: block;
+  width: 100%;
+  height: 500px;
+  border: none;
+  background: #fff;
+}
+
+.site-code {
+  max-height: 420px;
+  display: flex;
+  flex-direction: column;
+}
+
+.site-code-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-tertiary);
+}
+
+.site-code-name {
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+}
+
+.site-code-block {
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  background: var(--code-bg);
+  color: var(--code-text);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.site-copy-code-btn {
+  padding: 4px 10px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+}
+
+.site-copy-code-btn:hover {
+  background: var(--accent);
+  color: white;
+}
+
+.site-publish {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+}
+
+.publish-button {
+  padding: 8px 18px;
+  background: var(--accent);
+  color: white;
+  border: none;
+  border-radius: 7px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.publish-button:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.publish-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.site-published {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.site-url {
+  font-family: 'Monaco', 'Menlo', 'Ubuntu Mono', monospace;
+  font-size: 0.8rem;
+  color: var(--accent);
+  word-break: break-all;
+  text-decoration: underline;
+  min-width: 0;
+}
+
+.site-code .site-copy-code-btn {
+  flex-shrink: 0;
+}
+
+/* Same highlight.js token palette as chat code blocks, scoped to the Code tab
+   (it sits outside .markdown-content, so the existing rules do not reach it). */
+.site-code-block .hljs-keyword,
+.site-code-block .hljs-selector-tag {
+  color: var(--code-keyword);
+}
+
+.site-code-block .hljs-string,
+.site-code-block .hljs-regexp,
+.site-code-block .hljs-addition {
+  color: var(--code-string);
+}
+
+.site-code-block .hljs-number,
+.site-code-block .hljs-literal,
+.site-code-block .hljs-symbol,
+.site-code-block .hljs-bullet {
+  color: var(--code-number);
+}
+
+.site-code-block .hljs-comment,
+.site-code-block .hljs-quote,
+.site-code-block .hljs-deletion {
+  color: var(--code-comment);
+  font-style: italic;
+}
+
+.site-code-block .hljs-title,
+.site-code-block .hljs-title.function_,
+.site-code-block .hljs-built_in,
+.site-code-block .hljs-section,
+.site-code-block .hljs-name {
+  color: var(--code-title);
+}
+
+.site-code-block .hljs-attr,
+.site-code-block .hljs-attribute,
+.site-code-block .hljs-selector-attr,
+.site-code-block .hljs-selector-class,
+.site-code-block .hljs-parameter,
+.site-code-block .hljs-variable,
+.site-code-block .hljs-template-variable {
+  color: var(--code-attr);
+}
+
+.site-code-block .hljs-meta,
+.site-code-block .hljs-selector-id,
+.site-code-block .hljs-tag,
+.site-code-block .hljs-doctag,
+.site-code-block .hljs-type,
+.site-code-block .hljs-subst {
+  color: var(--code-meta);
+}
+
+@media (max-width: 600px) {
+  .site-preview-frame {
+    height: 380px;
+  }
+
+  .site-code {
+    max-height: 320px;
   }
 }
