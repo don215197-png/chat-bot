@@ -93,6 +93,22 @@ function Icon({ name, size = 16, className = '' }) {
         <line x1="12" y1="20" x2="12.01" y2="20" />
       </>
     ),
+    'file-text': (
+      <>
+        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+        <polyline points="14 2 14 8 20 8" />
+        <line x1="16" y1="13" x2="8" y2="13" />
+        <line x1="16" y1="17" x2="8" y2="17" />
+        <polyline points="10 9 9 9 8 9" />
+      </>
+    ),
+    upload: (
+      <>
+        <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+        <polyline points="17 8 12 3 7 8" />
+        <line x1="12" y1="3" x2="12" y2="15" />
+      </>
+    ),
   }
   return (
     <svg
@@ -635,6 +651,17 @@ function App() {
   const [sitesLoading, setSitesLoading] = useState(false)
   const [sitesError, setSitesError] = useState('')
   const [deletingSiteId, setDeletingSiteId] = useState(null)
+  const [documentsOpen, setDocumentsOpen] = useState(false)
+  const [myDocuments, setMyDocuments] = useState([])
+  const [documentsLoading, setDocumentsLoading] = useState(false)
+  const [documentsError, setDocumentsError] = useState('')
+  const [docUploadName, setDocUploadName] = useState('')
+  const [docUploadText, setDocUploadText] = useState('')
+  const [uploadingDoc, setUploadingDoc] = useState(false)
+  const [deletingDocId, setDeletingDocId] = useState(null)
+  // When checked, /chat requests inject the user's uploaded documents as
+  // retrieval context (the server embeds the query against their own chunks).
+  const [useRag, setUseRag] = useState(false)
   const messagesRef = useRef(null)
   const messagesEndRef = useRef(null)
   const inputRef = useRef(null)
@@ -669,6 +696,8 @@ function App() {
       saveSession(null)
       setHistory({ conversations: [], activeId: null })
       setMySites([])
+      setMyDocuments([])
+      setUseRag(false)
     }
   }, [session])
 
@@ -867,7 +896,7 @@ function App() {
 
       const response = await authedFetch('/chat/stream', {
         method: 'POST',
-        body: JSON.stringify({ messages: conversation, conversation_id: conversationId, stream: true }),
+        body: JSON.stringify({ messages: conversation, conversation_id: conversationId, stream: true, use_rag: useRag && myDocuments.length > 0 }),
         signal: abortControllerRef.current.signal
       })
 
@@ -1021,7 +1050,7 @@ function App() {
       // finishes (success or failure) without reaching for the mouse.
       requestAnimationFrame(() => inputRef.current?.focus())
     }
-  }, [updateMessages, authedFetch, setConversations])
+  }, [updateMessages, authedFetch, setConversations, useRag, myDocuments])
 
   const handleSend = async (e) => {
     e?.preventDefault()
@@ -1162,6 +1191,83 @@ function App() {
       setDeletingSiteId(null)
     }
   }, [deletingSiteId, mySites, authedFetch, setHistory])
+
+  // "My Documents" panel (RAG sources): lists THIS user's uploaded documents
+  // and lets them add or delete one. Uploading embeds the text server-side and
+  // indexes it for retrieval; the chat only ever searches the user's own index.
+  const refreshDocuments = useCallback(async () => {
+    setDocumentsLoading(true)
+    setDocumentsError('')
+    try {
+      const res = await authedFetch('/documents')
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.detail || `Failed to load documents (${res.status})`)
+      setMyDocuments(data.documents || [])
+    } catch (err) {
+      setDocumentsError(err.message || 'Failed to load documents')
+    } finally {
+      setDocumentsLoading(false)
+    }
+  }, [authedFetch])
+
+  const toggleDocuments = useCallback(() => {
+    setDocumentsOpen(open => {
+      if (!open) refreshDocuments()
+      return !open
+    })
+  }, [refreshDocuments])
+
+  const handleUploadDocument = useCallback(async (e) => {
+    e.preventDefault()
+    if (uploadingDoc) return
+    const filename = docUploadName.trim()
+    const text = docUploadText.trim()
+    if (!filename || !text) {
+      setDocumentsError('Provide a filename and some text')
+      return
+    }
+    setUploadingDoc(true)
+    setDocumentsError('')
+    try {
+      // Embedding runs synchronously on the backend (first use loads the local
+      // model), so the button stays busy until the chunks are indexed.
+      const res = await authedFetch('/documents', {
+        method: 'POST',
+        body: JSON.stringify({ filename, text })
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.detail || `Failed to upload (${res.status})`)
+      setDocUploadName('')
+      setDocUploadText('')
+      setMyDocuments(prev => [{ id: data.id, filename: data.filename, created_at: new Date().toISOString() }, ...prev])
+      showToast('Document indexed')
+    } catch (err) {
+      setDocumentsError(err.message || 'Failed to upload document')
+    } finally {
+      setUploadingDoc(false)
+    }
+  }, [docUploadName, docUploadText, uploadingDoc, authedFetch, showToast])
+
+  const deleteDocument = useCallback(async (doc) => {
+    if (deletingDocId) return
+    setDeletingDocId(doc.id)
+    const previous = myDocuments
+    setMyDocuments(prev => prev.filter(d => d.id !== doc.id))
+    try {
+      const res = await authedFetch(`/documents/${doc.id}`, { method: 'DELETE' })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.detail || `Failed to delete (${res.status})`)
+      }
+      // With nothing left to retrieve against, the RAG toggle has no effect.
+      if (myDocuments.length <= 1) setUseRag(false)
+    } catch (err) {
+      setMyDocuments(previous)
+      setDocumentsError(err.message || 'Failed to delete document')
+    } finally {
+      setDeletingDocId(null)
+    }
+  }, [deletingDocId, myDocuments, authedFetch])
 
   // Create a fresh empty conversation and switch to it. This replaces the old
   // "Clear chat" button — previous conversations stay usable in the sidebar.
@@ -1323,7 +1429,7 @@ function App() {
                 aria-label={isOnline ? 'Online' : 'Offline'}
               />
             </h1>
-            <p>Powered by hy3-free</p>
+            <p>Powered by big-pickle</p>
           </div>
         </div>
         <div className="header-actions">
@@ -1444,6 +1550,69 @@ function App() {
               </div>
             )}
           </div>
+        <div className="sidebar-docs">
+            <button type="button" className="sidebar-docs-toggle" onClick={toggleDocuments} aria-expanded={documentsOpen}>
+              <span className="sidebar-docs-label"><Icon name="file-text" size={14} /> My Documents</span>
+              <span className="sidebar-docs-caret">{documentsOpen ? '▾' : '▸'}</span>
+            </button>
+            {documentsOpen && (
+              <div className="sidebar-docs-body">
+                <form className="sidebar-docs-upload" onSubmit={handleUploadDocument}>
+                  <input
+                    type="text"
+                    className="doc-upload-name"
+                    value={docUploadName}
+                    onChange={(e) => setDocUploadName(e.target.value)}
+                    placeholder="Filename, e.g. notes.txt"
+                    aria-label="Document filename"
+                  />
+                  <textarea
+                    className="doc-upload-text"
+                    value={docUploadText}
+                    onChange={(e) => setDocUploadText(e.target.value)}
+                    placeholder="Paste the document text here…"
+                    aria-label="Document text"
+                    rows={4}
+                  />
+                  <button
+                    type="submit"
+                    className="doc-upload-button"
+                    disabled={uploadingDoc || !docUploadName.trim() || !docUploadText.trim()}
+                  >
+                    <Icon name="upload" size={14} /> {uploadingDoc ? 'Embedding…' : 'Upload & index'}
+                  </button>
+                </form>
+                {documentsError && (
+                  <p className="sidebar-docs-error" role="alert">{documentsError}</p>
+                )}
+                {documentsLoading ? (
+                  <p className="sidebar-empty">Loading documents…</p>
+                ) : myDocuments.length === 0 ? (
+                  <p className="sidebar-empty">No documents yet</p>
+                ) : (
+                  <ul className="sidebar-docs-list">
+                    {myDocuments.map(doc => (
+                      <li key={doc.id} className="sidebar-docs-item">
+                        <span className="sidebar-docs-info">
+                          <span className="sidebar-docs-title">{doc.filename}</span>
+                          <span className="sidebar-docs-sub">{formatRelativeTime(parseIso(doc.created_at))}</span>
+                        </span>
+                        <button
+                          type="button"
+                          className="sidebar-icon-btn delete"
+                          disabled={deletingDocId === doc.id}
+                          onClick={() => deleteDocument(doc)}
+                          aria-label={`Delete document ${doc.filename}`}
+                        >
+                          <Icon name="trash" size={14} />
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </div>
+            )}
+          </div>
         </nav>
 
         <main className="chat-container">
@@ -1501,6 +1670,25 @@ function App() {
               {toast}
             </div>
           )}
+
+          <div className="rag-bar">
+            <label className={`rag-toggle ${useRag && myDocuments.length > 0 ? 'on' : ''}`}>
+              <input
+                type="checkbox"
+                checked={useRag}
+                disabled={myDocuments.length === 0 || isLoading}
+                onChange={(e) => setUseRag(e.target.checked)}
+              />
+              <span>Answer using my documents</span>
+            </label>
+            {myDocuments.length > 0 ? (
+              <span className="rag-meta">
+                <Icon name="file-text" size={13} /> {myDocuments.length} indexed
+              </span>
+            ) : (
+              <span className="rag-meta rag-hint">Upload documents in the sidebar to enable</span>
+            )}
+          </div>
 
           <form className="input-form" onSubmit={handleSend}>
             <TextareaInput

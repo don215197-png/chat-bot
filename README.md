@@ -1,19 +1,19 @@
 # AI Chatbot
 
-A full-stack AI chatbot with React frontend and Python backend, using OpenCode's hy3-free model. Accounts, conversations, messages and published sites are persisted in SQLite on the backend; the browser only holds a session token.
+A full-stack AI chatbot with React frontend and Python backend, using OpenCode's big-pickle model. Accounts, conversations, messages and published sites are persisted in PostgreSQL on the backend; the browser only holds a session token.
 
 ## Architecture
 
 ```
-React Frontend (Vite) → POST /auth/login → Python Backend (http.server) → SQLite
-                     └── POST /chat (Bearer session) ─────────────────────→ OpenCode API → hy3-free
+React Frontend (Vite) → POST /auth/login → Python Backend (http.server) → PostgreSQL
+                     └── POST /chat (Bearer session) ────────────────────→ OpenCode API → big-pickle
 ```
 
 - **Frontend**: React + Vite, clean modern chat UI; login gate + session token in `localStorage`
-- **Backend**: Python built-in HTTP server (no external framework dependencies), SQLite via stdlib `sqlite3`
+- **Backend**: Python built-in HTTP server (no external framework dependencies), PostgreSQL via `psycopg` (connection pool)
 - **Auth**: register / login / logout; sessions table; passwords hashed with PBKDF2-SHA256 (salted)
 - **AI Provider**: OpenCode OpenAI-compatible API
-- **Model**: hy3-free
+- **Model**: big-pickle (override with `OPENCODE_MODEL`)
 - **Communication**: REST API with JSON, SSE streaming for `/chat/stream`
 
 ## Architecture & Security Decisions
@@ -39,8 +39,8 @@ non-obvious choice below is explained in the code as well; this is the summary.
   32-hex-char token into the `sessions` table with an expiry. **Why not JWT:**
   server-side sessions are immediately revocable (logout is a row delete), need
   no signing-key management, and can't be replayed after logout. **Trade-off:**
-  one indexed DB read per request — fine for a single SQLite instance, and the
-  main thing to revisit (Redist/db cache) if you scale out.
+  one indexed DB read per request — fine for a single PostgreSQL instance, and
+  the main thing to revisit (Redis/db cache) if you scale out.
 - **Passwords: PBKDF2-SHA256, 200k iterations, per-user random salt.** The salt
   and work factor live inside the stored string (`pbkdf2_sha256$iters$salt$hash`),
   so the format is self-describing and the factor can be raised later without a
@@ -79,14 +79,14 @@ non-obvious choice below is explained in the code as well; this is the summary.
   frame carries `assistant_message_id`; a later publish stores its URL back on
   that stored message (only if the message belongs to the same user), so the
   "Published ✓" state survives reloads.
-- **SQLite for storage.** Single-writer semantics, zero configuration, real
-  files. Contention is mitigated with `PRAGMA journal_mode=WAL` (readers no
-  longer block a writer) and `PRAGMA busy_timeout=5000` (a write hitting a brief
-  lock waits up to 5s and retries instead of failing with "database is locked").
-  This is consciously sized for a single-instance app; for multi-instance
-  production routing the right move is still Postgres + a connection pool —
-  data access is isolated in `database.py`, so the blast radius of that change
-  is contained.
+- **PostgreSQL for storage.** The data layer talks to Postgres through a
+  `psycopg` ConnectionPool with a `dict_row` row factory (one checkout per
+  operation, MVCC for concurrent readers/writers). Using a real database server
+  (not an embedded file) is what lets the same code run locally, in
+  docker-compose, in CI, and on a managed host without changing a line — swap
+  `DATABASE_URL` and the schema boots itself on first connect. Access is
+  isolated in `database.py`; `server.py` never sees SQL, so the storage engine's
+  blast radius stays contained.
 
 ## Project Structure
 
@@ -103,11 +103,12 @@ non-obvious choice below is explained in the code as well; this is the summary.
 │   ├── .env.example      # Documented frontend env vars
 │   └── Dockerfile        # Build + static serve (nginx)
 ├── backend/
-│   ├── server.py         # HTTP server: /auth, /conversations, /chat, /chat/stream, /sites
-│   ├── database.py       # SQLite schema + access helpers
+│   ├── server.py         # HTTP server: /auth, /conversations, /chat, /chat/stream, /sites, /documents
+│   ├── database.py       # PostgreSQL schema + access helpers (psycopg connection pool)
+│   ├── rag.py            # RAG: chunk/embed/retrieve + per-user Chroma vector store
 │   ├── requirements.txt  # Python dependencies
 │   ├── pytest.ini        # pytest configuration
-│   ├── tests/            # pytest suite (auth, conversations, sites, rate limiting)
+│   ├── tests/            # pytest suite (auth, conversations, sites, rate limiting, documents/RAG)
 │   ├── .env.example      # Documented backend env vars
 │   ├── generated_sites/  # Published site files (gitignored, created at runtime)
 │   └── Dockerfile        # Python runtime image
@@ -125,8 +126,11 @@ source venv/bin/activate             # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-`requirements.txt` has only three packages — `requests`, `python-dotenv`, and
-`pytest` — because the server itself is stdlib-only (`http.server` + `sqlite3`).
+`requirements.txt` has only a handful of packages — `requests`, `python-dotenv`,
+`psycopg[binary,pool]`, and `pytest` — because the server itself is stdlib-only
+(`http.server`). The rest (`sentence-transformers`, `chromadb`, `pypdf`) powers
+the optional **RAG** feature: the embedding model (~90 MB) downloads on first
+use and is cached by Hugging Face afterwards.
 The `venv/` directory is gitignored. To leave the virtualenv later, run `deactivate`.
 
 ### Frontend
@@ -143,9 +147,16 @@ The backend reads these from `backend/.env` (create it by copying `backend/.env.
 ### Backend (`backend/.env`)
 
 ```env
-# OpenCode API key — hy3-free is free and needs NO key; leave empty.
+# OpenCode API key — big-pickle is free and needs NO key; leave empty.
 # Only set if the provider changes to a paid model requiring auth.
 OPENCODE_API_KEY=
+# Model id on the OpenCode inference endpoint (default big-pickle).
+
+# Load-test seam: MOCK_UPSTREAM=1 answers /chat from an in-process fake
+# provider so a load test measures this server (auth, DB, rate limiting)
+# instead of the provider's latency, and never calls the real API.
+# Default: off.
+MOCK_UPSTREAM=false
 
 # Port to listen on (default 8000). Useful behind a reverse proxy.
 PORT=8000
@@ -154,6 +165,16 @@ PORT=8000
 # The dev origins http://localhost:5173 and http://127.0.0.1:5173 are always allowed.
 # Example: ALLOWED_ORIGINS=https://myapp.com,https://www.myapp.com
 ALLOWED_ORIGINS=
+
+# PostgreSQL connection (libpq URI). Where all users/sessions/conversations/
+# messages/site metadata live. Default: postgresql://chatbot:chatbot@localhost:5433/chatbot
+# (the docker-compose Postgres). Start that server with `docker compose up -d db`,
+# or point this at any other PostgreSQL.
+DATABASE_URL=
+
+# RAG vector-store directory (ChromaDB persist path). Defaults to backend/chroma_data.
+# Set to an empty string for an in-memory store (used by the test suite).
+# CHROMA_DIR=/app/chroma_data
 
 # ---------------------------------------------------------------------------
 # Rate limiting (Phase 2). Buckets are per-IP, in-memory, and per-process:
@@ -176,9 +197,9 @@ PUBLISH_WINDOW_SECONDS=600
 PUBLISH_DAILY_LIMIT=50
 ```
 
-Defaults for the remaining knobs (set them as `DATABASE_PATH`, `SESSION_TTL_SECONDS`
-in `.env` if you need to change): the SQLite file lives at `backend/chatbot.db`;
-sessions last 30 days; published sites are capped at 2 MB and retained 7 days.
+Defaults for the remaining knobs (set them as `SESSION_TTL_SECONDS` in `.env`
+if you need to change): sessions last 30 days; published sites are capped at
+2 MB and retained 7 days.
 
 Exceeding any limit returns `429` with a `Retry-After` header (seconds) and a
 `{ "detail": ..., "retry_after": <seconds> }` body. `/health`, `GET /sites/<id>`
@@ -196,6 +217,12 @@ VITE_API_URL=http://localhost:8000
 
 ## Running the Application (Development)
 
+The backend needs a running PostgreSQL. The easiest start (with Docker
+installed) is `docker compose up -d db` — it creates the `chatbot` database,
+user and password matching the default `DATABASE_URL`, and publishes it on
+`localhost:5433` (5432 may already be a native Postgres install). In CI,
+GitHub Actions spins up its own Postgres service.
+
 ### Start Backend (Terminal 1)
 
 ```bash
@@ -204,9 +231,9 @@ python server.py
 ```
 
 You should see `Backend server running on http://0.0.0.0:8000`. First run
-creates `chatbot.db` (SQLite) and `generated_sites/` automatically
-(`database.init_db()`). Verify it's alive at http://localhost:8000/health →
-`{"status": "ok"}`.
+creates the schema in PostgreSQL (`database.init_db()`) and the
+`generated_sites/` directory if needed. Verify it's alive at
+http://localhost:8000/health → `{"status": "ok"}`.
 
 ### Start Frontend (Terminal 2)
 
@@ -219,26 +246,40 @@ Frontend runs on `http://localhost:5173`.
 
 ## Running in Production
 
-Backend and frontend can be deployed as containers (each ships a `Dockerfile`).
-
-### Backend container
+The repo ships a `docker-compose.yml` that runs the whole stack — PostgreSQL,
+backend, and the nginx-served frontend — together:
 
 ```bash
+docker compose up -d --build
+```
+
+- **Frontend** → http://localhost:8080  (React static build served by nginx)
+- **Backend** → http://localhost:8000  (`/health` checks it)
+- **Postgres** → published on `localhost:5433` (internal name `db:5432` in the
+  compose network, where the backend connects)
+- Published sites are persisted in the `sites` named volume (survives restarts)
+- The Postgres data lives in the `pgdata` named volume
+
+Scale the frontend freely; the backend is a single process by design (its
+rate-limit buckets are in-memory), so keep it to one replica unless you move
+those buckets to Redis.
+
+### Manual containers (equivalent)
+
+```bash
+# Backend
 cd backend
 docker build -t ai-chatbot-backend .
 docker run -d --name ai-chatbot-backend \
   -p 8000:8000 \
+  -e DATABASE_URL=postgresql://chatbot:chatbot@<db-host>:5432/chatbot \
   -e ALLOWED_ORIGINS=https://your-frontend-domain.com \
-  -v ai-chatbot-data:/app/data \
+  -v ai-chatbot-sites:/app/generated_sites \
   ai-chatbot-backend
 ```
 
-> Mount a volume over the app's data paths so the SQLite database (`chatbot.db`)
-> and your published sites (`generated_sites/`) survive container restarts.
-
-### Frontend container
-
 ```bash
+# Frontend
 cd frontend
 docker build -t ai-chatbot-frontend \
   --build-arg VITE_API_URL=https://your-backend-domain.com \
@@ -257,7 +298,7 @@ so CORS allows it.
 
 ### Deploying a public backend
 
-`hy3-free` needs no paid API key, so an open backend is not a billing risk — it is only
+`big-pickle` needs no paid API key, so an open backend is not a billing risk — it is only
 about your own bandwidth/compute. Since there are real accounts and sessions, keep the
 deployment honest: force HTTPS at the reverse proxy, add your public origin to
 `ALLOWED_ORIGINS`, and consider TLS-terminating so session tokens and passwords are
@@ -270,7 +311,7 @@ must remember their password (reset is out of scope).
    The backend mints a session token (a row in the `sessions` table); the frontend keeps
    only `{ token, email }` in `localStorage`.
 2. The frontend loads the user's conversations (`GET /conversations`) — all owned by the
-   account, persisted in SQLite (no `localStorage` history).
+   account, persisted in PostgreSQL (no `localStorage` history).
 3. User types a message. For a brand-new chat the frontend first creates it:
    `POST /conversations { "title": "..." }` → `{ "id": "..." }`.
 4. Frontend sends `POST /chat/stream` to backend with the session Bearer token:
@@ -285,7 +326,7 @@ must remember their password (reset is out of scope).
    forwards to OpenCode API:
    ```json
    {
-     "model": "hy3-free",
+     "model": "big-pickle",
      "messages": [
        { "role": "system", "content": "You are a helpful AI assistant. …" },
        { "role": "user", "content": "user message" }
@@ -299,8 +340,8 @@ must remember their password (reset is out of scope).
    delivered as **exactly one self-contained ```` ```html ```` code block** —
    inline CSS in `<style>`, inline JS in `<script>`, external libraries only via
    CDN, and no build/install steps (the file works when opened directly).
-6. The user and assistant messages are persisted to SQLite as the stream streams
-   through. The final SSE frame carries
+6. The user and assistant messages are persisted to PostgreSQL as the stream
+   streams through. The final SSE frame carries
    `data: {"assistant_message_id": "<id>"}` so the client can attribute a later
    publish to the exact stored reply.
 7. Frontend renders the streamed answer in the chat UI; on reload, history and
@@ -329,7 +370,7 @@ links a shareable URL.
 
 ### Managing your sites
 
-Published pages are owned by the **user account** that published them (rows in the SQLite
+Published pages are owned by the **user account** that published them (rows in the PostgreSQL
 `sites` table). Listing and deleting require the same session token used everywhere else.
 
 - `GET /sites` - list **your own** sites, newest first, as
@@ -348,13 +389,55 @@ Published pages are owned by the **user account** that published them (rows in t
   site automatically go back to the unpublished state.
 
 Site metadata (owner user id, created time, size, title, originating message) lives in
-SQLite, not in `index.json` — there is no separate metadata file to maintain.
+PostgreSQL, not in `index.json` — there is no separate metadata file to maintain.
 
 ### Retention
 
 Sites are plain files under `backend/generated_sites/`. They are cleaned up at
 startup when older than `SITE_TTL_SECONDS` (default **7 days**) — set by those
 constants in `backend/server.py`. The directory is gitignored.
+
+## Answering from your own documents (RAG)
+
+Beyond chat and website generation, the app can answer questions grounded in
+documents you upload. This is retrieval-augmented generation (RAG): the backend
+embeds each upload into a vector store, and when the RAG toggle is on it pulls
+the most relevant chunks of *your own* text into the model's context before the
+model answers.
+
+- **"My Documents"** panel in the sidebar: upload a named text document
+  (optional filename + text), list what you've indexed with relative times, and
+  delete documents one-click. The panel is per-account — documents are scoped to
+  the uploader, and deletion also removes the vectors. Deleting the last document
+  turns the RAG toggle back off.
+- **RAG toggle** above the composer: disabled until at least one document is
+  indexed. When on, every `/chat` (and `/chat/stream`) request carries
+  `use_rag: true` and the server retrieves the top matching chunks for the
+  latest user message, injects them as retrieved context, and answers from them.
+
+### Endpoints
+
+- `POST /documents` - index a document. Body `{ "filename": "...", "text": "..." }`.
+  Requires a session. The text is chunked, embedded with the `all-MiniLM-L6-v2`
+  model, and stored per-user in ChromaDB; then a `documents` row is persisted.
+  Returns `201 { "id", "filename" }`. Embedding happens lazily — the model client
+  and vector store initialize on first use.
+- `GET /documents` - list **your own** documents, newest first, as
+  `{ "documents": [{ "id", "filename", "created_at" }] }`.
+- `GET /documents/<id>` / `DELETE /documents/<id>` - owner-only read/delete
+  metadata, mirroring conversations: `404` unknown, `403` on another account.
+  `DELETE` also purges that document's vectors (best-effort) and its row;
+  `200 { "deleted": "<id>" }` on success.
+
+### Storage
+
+- Vector store: **ChromaDB**, one collection per user id, persisted under
+  `backend/chroma_data` (override with `CHROMA_DIR`; the test suite sets it to an
+  empty string for an in-memory store). Documents are chunked with overlap before
+  embedding — deletion removes the chunk embeddings so retrieval can't return a
+  deleted document.
+- Metadata: a `documents` table in PostgreSQL (`id`, `user_id`, `filename`,
+  `created_at`), so the RAG index is fully accountable per account.
 
 ## Features
 
@@ -364,7 +447,7 @@ constants in `backend/server.py`. The directory is gitignored.
 - ✅ Enter key to send message; Send button disabled while loading
 - ✅ Error handling with user-friendly messages and retry/dismiss
 - ✅ Account auth: register / login / logout, sessions, PBKDF2-hashed passwords
-- ✅ Multi-conversation chat: new/rename/delete conversations, active-chat switching, **per-account history persisted in SQLite** (no `localStorage` chat data)
+- ✅ Multi-conversation chat: new/rename/delete conversations, active-chat switching, **per-account history persisted in PostgreSQL** (no `localStorage` chat data)
 - ✅ Conversations and messages survive logout → login (per-user, isolated between accounts)
 - ✅ Inline sidebar rename and two-step delete of conversations (persisted server-side)
 - ✅ Dark/light theme toggle (the only per-browser local setting)
@@ -377,7 +460,8 @@ constants in `backend/server.py`. The directory is gitignored.
 - ✅ Per-IP rate limiting on chat and publish routes (`429` + `Retry-After`, sliding window + daily cap)
 - ✅ **My Sites** panel: list, open, and unpublish the sites you published (account-owned)
 - ✅ 7-day retention + 2 MB size cap on published sites
-- ✅ `pytest` suite covering auth, conversation ownership, chat persistence/replay, sites, rate-limiting boundaries, and security paths (traversal, password round-trip, IDOR)
+- ✅ **RAG**: upload documents in the sidebar, then flip the toggle so answers are grounded in your own text (per-user Chroma vector store, owner-scoped `documents` rows)
+- ✅ `pytest` suite covering auth, conversation ownership, chat persistence/replay, sites, rate-limiting boundaries, documents/RAG, and security paths (traversal, password round-trip, IDOR)
 
 ## Error Handling
 
@@ -417,17 +501,25 @@ and published sites all require the session token.
 
 ```bash
 cd backend
-python -m pytest -q   # 37 tests: auth, conversations, chat persistence/replay, sites, rate limits, security paths
+python -m pytest -q   # auth, conversations, chat persistence/replay, sites, rate limits, security paths
 ```
 
+The suite runs against a dedicated `chatbot_test` PostgreSQL database
+(`conftest.py` creates it on first run; CI uses a Postgres service container).
+Every test stubs the upstream OpenCode call, so the suite is fully offline.
+Expect **48 tests** to pass with a reachable `DATABASE_URL`.
+
 The suite spins up a real `http.server` on an ephemeral port and uses a scratch
-SQLite database per test, with the upstream OpenCode API mocked out.
+PostgreSQL database per test (a fresh schema + rate-limit reset each test, with
+the upstream OpenCode API mocked out). The RAG tests embed with the real
+`all-MiniLM-L6-v2` model — the first run downloads it once to the Hugging Face
+cache, which can take a minute or two on a cold environment.
 
 ## Security Notes
 
 - Never commit `.env` files to version control
 - API key stays on backend only
-- Passwords are stored PBKDF2-SHA256-salted (never plaintext); session tokens are random 32-char ids in SQLite with an expiry
+- Passwords are stored PBKDF2-SHA256-salted (never plaintext); session tokens are random 32-char ids in PostgreSQL with an expiry
 - Conversations and messages are scoped per user — one account can never read or write another's data
 - Frontend communicates only with the configured backend origin
 - CORS restricted to an allowlist in development and production

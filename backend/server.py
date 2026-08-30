@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 import database
+import rag
 
 load_dotenv()
 
@@ -22,6 +23,14 @@ logger = logging.getLogger("chatbot.backend")
 
 OPENCODE_API_URL = "https://opencode.ai/inference/openai/v1/chat/completions"
 OPENCODE_API_KEY = os.getenv("OPENCODE_API_KEY")
+# Model id for the OpenCode inference endpoint. hy3-free is no longer mapped
+# there ("Model is unavailable"); keep the default on a live free model.
+OPENCODE_MODEL = os.getenv("OPENCODE_MODEL", "big-pickle")
+# Load-test seam: MOCK_UPSTREAM=1 makes /chat and /chat/stream answer from an
+# in-process fake provider so a load test measures THIS server's throughput
+# (auth, DB, rate limiting) instead of the provider's latency, and never burns
+# real API calls. Production is unaffected unless explicitly enabled.
+MOCK_UPSTREAM = os.getenv("MOCK_UPSTREAM") == "1"
 
 DEFAULT_ALLOWED_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
 # Extend the allowlist at deploy time without editing code.
@@ -211,6 +220,36 @@ def request_with_retry(func, *args, **kwargs):
             raise
     return last_response, last_error
 
+
+def call_openai(payload, headers, stream):
+    if MOCK_UPSTREAM:
+        return _MockUpstream(payload)
+    return requests.post(OPENCODE_API_URL, json=payload, headers=headers, timeout=(15, 120), stream=stream)
+
+
+class _MockUpstream:
+    """In-process fake provider for the MOCK_UPSTREAM load-test seam. Mirrors
+    the OpenAI-style JSON and SSE framing the real endpoint uses, so the
+    streaming path in handle_stream_response() runs unmodified; only the
+    answer text is synthetic."""
+
+    ok = True
+    status_code = 200
+
+    def __init__(self, payload):
+        last_user = next((m.get("content", "") for m in payload["messages"] if m["role"] == "user"), "")
+        self._answer = f"Mock reply ({len(last_user)} chars)."
+
+    def json(self):
+        return {"choices": [{"message": {"content": self._answer}}]}
+
+    def iter_lines(self, decode_unicode=True):
+        yield "data: " + json.dumps({"choices": [{"delta": {"content": self._answer}}]})
+        yield "data: [DONE]"
+
+    def close(self):
+        pass
+
 def parse_ai_error(response: requests.Response) -> str:
     try:
         error_data = response.json()
@@ -307,8 +346,14 @@ class ChatHandler(BaseHTTPRequestHandler):
             user = self._require_user()
             if user:
                 self.handle_list_sites(user)
+        elif path == "/documents":
+            user = self._require_user()
+            if user:
+                self.handle_list_documents(user)
         elif path.startswith("/sites/"):
             self.handle_get_site(path[len("/sites/"):])
+        elif path.startswith("/documents/"):
+            self.handle_get_document(path[len("/documents/"):])
         else:
             self.send_error(404)
 
@@ -353,6 +398,10 @@ class ChatHandler(BaseHTTPRequestHandler):
                 user = self._require_user()
                 if user:
                     self.handle_create_site(user)
+            elif path == "/documents":
+                user = self._require_user()
+                if user:
+                    self.handle_create_document(user)
             else:
                 self.send_error(404)
         except Exception as e:
@@ -383,6 +432,8 @@ class ChatHandler(BaseHTTPRequestHandler):
                 self.handle_delete_conversation(path[len("/conversations/"):])
             elif path.startswith("/sites/"):
                 self.handle_delete_site(path[len("/sites/"):])
+            elif path.startswith("/documents/"):
+                self.handle_delete_document(path[len("/documents/"):])
             else:
                 self.send_error(404)
         except Exception as e:
@@ -643,6 +694,94 @@ class ChatHandler(BaseHTTPRequestHandler):
         database.delete_published_site(site_id)
         self.send_json_response(200, {"deleted": site_id})
 
+    # ---- uploaded documents (RAG sources) ----------------------------------
+
+    def handle_create_document(self, user):
+        try:
+            data = self._read_json_body()
+        except Exception:
+            self.send_json_response(400, {"detail": "Invalid JSON body"})
+            return
+
+        text = data.get("text")
+        if not isinstance(text, str) or not text.strip():
+            self.send_json_response(400, {"detail": "Document text cannot be empty"})
+            return
+        filename = str(data.get("filename", "") or "").strip()
+        if not filename:
+            self.send_json_response(400, {"detail": "filename cannot be empty"})
+            return
+
+        document_id = database.new_id()
+        try:
+            # Embed BEFORE the DB row exists so a failed doc never leaves a
+            # half-embedded orphan behind.
+            rag.embed_and_store(document_id, user["id"], text)
+        except Exception as e:
+            logger.error("Document embedding failed for user %s: %s", user["id"], e)
+            self.send_json_response(500, {"detail": f"Failed to embed document: {str(e)}"})
+            return
+
+        try:
+            database.create_document(document_id, user["id"], filename[:255])
+        except Exception as e:
+            rag.delete_document_chunks(user["id"], document_id)  # best-effort rollback
+            logger.error("Document insert failed for user %s: %s", user["id"], e)
+            self.send_json_response(500, {"detail": f"Failed to store document: {str(e)}"})
+            return
+
+        self.send_json_response(201, {"id": document_id, "filename": filename})
+
+    def handle_list_documents(self, user):
+        rows = database.list_user_documents(user["id"])
+        documents = [
+            {"id": r["id"], "filename": r["filename"], "created_at": r["created_at"]}
+            for r in rows
+        ]
+        self.send_json_response(200, {"documents": documents})
+
+    def handle_get_document(self, document_id):
+        # GET /documents/<id> is owner-only, mirroring GET /conversations/<id>:
+        # the vector store is never exposed raw, only its listed metadata.
+        user = self._require_user()
+        if not user:
+            return
+        if not _UUID_RE.match(document_id):
+            self.send_json_response(404, {"detail": "Document not found"})
+            return
+        document = database.get_document(document_id)
+        if document is None:
+            self.send_json_response(404, {"detail": "Document not found"})
+            return
+        if document["user_id"] != user["id"]:
+            self.send_json_response(403, {"detail": "Not allowed to view this document"})
+            return
+        self.send_json_response(200, {
+            "id": document["id"],
+            "filename": document["filename"],
+            "created_at": document["created_at"],
+        })
+
+    def handle_delete_document(self, document_id):
+        # Owners delete their own uploaded documents. 404 when unknown, 403 when
+        # it belongs to another account — same ownership contract as sites.
+        user = self._require_user()
+        if not user:
+            return
+        if not _UUID_RE.match(document_id):
+            self.send_json_response(404, {"detail": "Document not found"})
+            return
+        document = database.get_document(document_id)
+        if document is None:
+            self.send_json_response(404, {"detail": "Document not found"})
+            return
+        if document["user_id"] != user["id"]:
+            self.send_json_response(403, {"detail": "Not allowed to delete this document"})
+            return
+        rag.delete_document_chunks(user["id"], document_id)  # best-effort
+        database.delete_document(document_id)
+        self.send_json_response(200, {"deleted": document_id})
+
     # ---- chat --------------------------------------------------------------
 
     def handle_chat(self, user, stream=False):
@@ -705,6 +844,31 @@ class ChatHandler(BaseHTTPRequestHandler):
         if OPENCODE_API_KEY and OPENCODE_API_KEY.strip():
             headers["Authorization"] = f"Bearer {OPENCODE_API_KEY.strip()}"
 
+        # Optional RAG: when the client asks (use_rag: true), retrieve the
+        # user's OWN most relevant document chunks for the latest turn and feed
+        # them to the model as context. Only the system prompt changes — the
+        # payload shape, model, and upstream call are untouched. Retrieval is
+        # scoped to the user's collection in rag.py.
+        use_rag = data.get("use_rag") is True
+        user_context = ""
+        if use_rag:
+            latest_user_message = next(
+                (m["content"] for m in reversed(cleaned_messages) if m["role"] == "user"),
+                "",
+            )
+            if latest_user_message.strip():
+                try:
+                    retrieved = rag.retrieve_relevant_chunks(user["id"], latest_user_message)
+                except Exception as e:
+                    retrieved = []
+                    logger.warning("RAG retrieval failed for user %s: %s", user["id"], e)
+                if retrieved:
+                    user_context = (
+                        "\n\nThe user has uploaded documents they may have referenced. "
+                        "Use the following retrieved context to answer, if relevant:\n"
+                        + "\n\n".join(f"- {chunk}" for chunk in retrieved)
+                    )
+
         system_prompt = (
             "You are a helpful AI assistant. Respond directly with your answer or code. "
             "Do NOT output internal thoughts or meta commentary.\n\n"
@@ -719,13 +883,14 @@ class ChatHandler(BaseHTTPRequestHandler):
             "- Never tell the user to install, compile, or run a build step. The page must work "
             "as-is when the HTML file is opened in a browser and served as static HTML."
         )
+        system_prompt = system_prompt + user_context
         payload_messages = [
             {"role": "system", "content": system_prompt},
             *cleaned_messages
         ]
 
         payload = {
-            "model": "hy3-free",
+            "model": OPENCODE_MODEL,
             "messages": payload_messages,
             "temperature": 0.7,
             "max_tokens": 16384,
@@ -741,7 +906,7 @@ class ChatHandler(BaseHTTPRequestHandler):
 
         try:
             def make_request():
-                return requests.post(OPENCODE_API_URL, json=payload, headers=headers, timeout=(15, 120), stream=stream)
+                return call_openai(payload, headers, stream)
 
             response, error = request_with_retry(make_request)
 

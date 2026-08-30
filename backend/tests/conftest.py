@@ -2,18 +2,53 @@ import os
 import sys
 import json
 import threading
+from urllib.parse import urlsplit
 
 import pytest
 
-# Point the whole test run at an isolated, throwaway database created before
-# database.server are imported (both read DATABASE_PATH at import time).
-TEST_DB = os.path.join(os.path.dirname(os.path.abspath(__file__)), "test_chatbot.db")
-os.environ["DATABASE_PATH"] = TEST_DB
+# Point the whole test run at a throwaway PostgreSQL database, created before
+# database/server are imported (both read env vars at import time). If the test
+# database does not exist yet (e.g. the first local run against a fresh
+# `docker compose up db`), connect to the server's maintenance database and
+# create it — CI's postgres service just ships it pre-created via POSTGRES_DB.
+TEST_DB = "chatbot_test"
+TEST_DB_PORT = os.environ.get("TEST_DB_PORT", "5433")
+os.environ["DATABASE_URL"] = f"postgresql://chatbot:chatbot@localhost:{TEST_DB_PORT}/{TEST_DB}"
 os.environ.pop("OPENCODE_API_KEY", None)
+# In-memory Chroma for the whole test run: isolated per process, nothing written
+# to disk. Set before server/rag are imported (rag reads it at import time).
+os.environ["CHROMA_DIR"] = ""
+
+import psycopg  # noqa: E402
 
 import database  # noqa: E402
 import server as server_module  # noqa: E402
 import requests  # noqa: E402
+
+
+def _ensure_test_database():
+    url = os.environ["DATABASE_URL"]
+    dbname = urlsplit(url).path.lstrip("/")
+    try:
+        conn = psycopg.connect(url)
+        conn.close()
+        return
+    except psycopg.OperationalError:
+        pass
+    # Same credentials, but connected to the always-present 'postgres' db.
+    maintenance = url.rsplit("/", 1)[0] + "/postgres"
+    admin = psycopg.connect(maintenance)
+    try:
+        admin.autocommit = True
+        with admin.cursor() as cur:
+            cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (dbname,))
+            if not cur.fetchone():
+                cur.execute(f'CREATE DATABASE "{dbname}"')
+    finally:
+        admin.close()
+
+
+_ensure_test_database()
 
 
 @pytest.fixture(autouse=True)

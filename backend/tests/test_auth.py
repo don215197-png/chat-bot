@@ -109,10 +109,11 @@ def test_expired_session_is_rejected(api):
     token = res.json()["token"]
     conn = database.connect()
     try:
-        conn.execute(
-            "UPDATE sessions SET expires_at = '2000-01-01T00:00:00+00:00' WHERE token = ?",
-            (token,),
-        )
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE sessions SET expires_at = '2000-01-01T00:00:00+00:00' WHERE token = %s",
+                (token,),
+            )
         conn.commit()
     finally:
         database.close(conn)

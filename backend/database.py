@@ -1,21 +1,28 @@
 import os
-import sqlite3
 import threading
 import time
 import uuid
 from datetime import datetime, timezone
 
+import psycopg
+from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
+
 # ---------------------------------------------------------------------------
-# SQLite persistence for user accounts, conversations, messages, sessions and
-# published-site ownership. One short-lived connection per operation against
-# the default file DB (ThreadingHTTPServer runs each request on its own thread,
-# so a shared connection would need cross-thread guarding). Tests may point
-# DATABASE_PATH at ":memory:", which requires a single shared connection —
-# guarded by a lock — since each :memory: connection is its own empty database.
+# PostgreSQL persistence for user accounts, conversations, messages, sessions
+# and published-site ownership. Access goes through a psycopg3 connection pool
+# (one checkout per operation, released straight back), so concurrent requests —
+# ThreadingHTTPServer runs each on its own thread — never block each other:
+# MVCC gives readers a consistent snapshot while writers proceed, and short
+# transactions serialize naturally under the pool's cap.
+#
+# Point DATABASE_URL at any PostgreSQL (local container, CI service, managed
+# host). server.py's HTTP/AI logic is fully agnostic to the storage engine —
+# only this module knows the database.
 # ---------------------------------------------------------------------------
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-DB_PATH = os.getenv("DATABASE_PATH", os.path.join(BASE_DIR, "chatbot.db"))
+DEFAULT_DATABASE_URL = "postgresql://chatbot:chatbot@localhost:5433/chatbot"
+DATABASE_URL = os.getenv("DATABASE_URL", DEFAULT_DATABASE_URL)
 
 SESSION_TTL_SECONDS = 30 * 24 * 60 * 60
 
@@ -44,6 +51,7 @@ CREATE TABLE IF NOT EXISTS conversations (
 
 CREATE TABLE IF NOT EXISTS messages (
   id TEXT PRIMARY KEY,
+  seq BIGSERIAL,
   conversation_id TEXT NOT NULL REFERENCES conversations(id),
   role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
   content TEXT NOT NULL,
@@ -59,48 +67,88 @@ CREATE TABLE IF NOT EXISTS published_sites (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS documents (
+  id TEXT PRIMARY KEY,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  filename TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at);
-CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, seq);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_sites_user ON published_sites(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_documents_user ON documents(user_id, created_at);
 """
 
-_memory_conns = []
-_conn_guard = threading.Lock()
+_pool = None
+_pool_guard = threading.Lock()
 
 
-def _raw_connect():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys = ON")
-    if DB_PATH != ":memory:":
-        # WAL lets readers proceed while a writer holds the lock (file DBs only;
-        # journal_mode is meaningless for :memory:). busy_timeout makes a brief
-        # lock contention retry for up to 5s instead of failing with "database
-        # is locked" — SQLite serializes writers, so this tunes the wait rather
-        # than removing serialization.
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-    return conn
+def _get_pool():
+    # Lazy creation so importing the module (e.g. from tests, or while Postgres
+    # is still warming up) never fails; the first connect() performs the
+    # handshake. dict_row factory makes every row a plain dict (row["col"]).
+    global _pool
+    if _pool is None:
+        with _pool_guard:
+            if _pool is None:
+                _pool = ConnectionPool(
+                    conninfo=DATABASE_URL,
+                    min_size=1,
+                    max_size=10,
+                    kwargs={"row_factory": dict_row},
+                )
+    return _pool
 
 
 def connect():
-    # A shared, locked connection for the in-memory DB; a fresh per-call
-    # connection for file-backed databases.
-    if DB_PATH == ":memory:":
-        with _conn_guard:
-            if not _memory_conns:
-                _memory_conns.append(_raw_connect())
-            return _memory_conns[0]
-    return _raw_connect()
+    return _get_pool().getconn()
 
 
-def close(conn):
-    if DB_PATH != ":memory:":
+def close(conn, broken=False):
+    # Return the connection to the pool; if it is broken (e.g. the server
+    # restarted under us, or psycopg_pool 3.3 dropped the putconn(close=) flag
+    # this module once passed), discard it instead. Any uncommitted/aborted
+    # transaction is rolled back so a caught error can never poison reuse.
+    if conn is None:
+        return
+    discard = broken or conn.broken or conn.closed
+    if not discard:
+        try:
+            conn.rollback()
+        except Exception:
+            discard = True
+    try:
+        if discard:
+            conn.close()
+        else:
+            _get_pool().putconn(conn)
+    except Exception:
         try:
             conn.close()
         except Exception:
             pass
+
+
+def _execute(conn, sql, params=()):
+    # psycopg3 runs SQL on a Cursor, not the Connection; each helper wraps the
+    # checkout in a short-lived cursor (the row_factory from the pool applies),
+    # leaving the connection itself open for the caller to commit/release.
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+
+
+def _fetchone(conn, sql, params=()):
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return cur.fetchone()
+
+
+def _fetchall(conn, sql, params=()):
+    with conn.cursor() as cur:
+        cur.execute(sql, params)
+        return cur.fetchall()
 
 
 def init_db(drop_existing=False):
@@ -109,13 +157,16 @@ def init_db(drop_existing=False):
         if drop_existing:
             for table in (
                 "published_sites",
+                "documents",
                 "messages",
                 "conversations",
                 "sessions",
                 "users",
             ):
-                conn.execute(f"DROP TABLE IF EXISTS {table}")
-        conn.executescript(SCHEMA)
+                _execute(conn, f"DROP TABLE IF EXISTS {table}")
+        for stmt in SCHEMA.split(";"):
+            if stmt.strip():
+                _execute(conn, stmt)
         conn.commit()
     finally:
         close(conn)
@@ -129,18 +180,15 @@ def new_id():
     return uuid.uuid4().hex
 
 
-def _row_to_dict(row):
-    return dict(row) if row is not None else None
-
-
 # ---- users / sessions ------------------------------------------------------
 
 def create_user(email, password_hash):
     conn = connect()
     try:
         user_id = new_id()
-        conn.execute(
-            "INSERT INTO users (id, email, password_hash, created_at) VALUES (?, ?, ?, ?)",
+        _execute(
+            conn,
+            "INSERT INTO users (id, email, password_hash, created_at) VALUES (%s, %s, %s, %s)",
             (user_id, email, password_hash, utcnow_iso()),
         )
         conn.commit()
@@ -152,8 +200,7 @@ def create_user(email, password_hash):
 def get_user_by_email(email):
     conn = connect()
     try:
-        row = conn.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
-        return _row_to_dict(row)
+        return _fetchone(conn, "SELECT * FROM users WHERE email = %s", (email,))
     finally:
         close(conn)
 
@@ -161,8 +208,7 @@ def get_user_by_email(email):
 def get_user_by_id(user_id):
     conn = connect()
     try:
-        row = conn.execute("SELECT * FROM users WHERE id = ?", (user_id,)).fetchone()
-        return _row_to_dict(row)
+        return _fetchone(conn, "SELECT * FROM users WHERE id = %s", (user_id,))
     finally:
         close(conn)
 
@@ -173,8 +219,9 @@ def create_session(user_id):
         token = new_id()
         now = utcnow_iso()
         expires = datetime.fromtimestamp(time.time() + SESSION_TTL_SECONDS, tz=timezone.utc).isoformat()
-        conn.execute(
-            "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+        _execute(
+            conn,
+            "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (%s, %s, %s, %s)",
             (token, user_id, now, expires),
         )
         conn.commit()
@@ -188,13 +235,13 @@ def get_user_by_session(token):
         return None
     conn = connect()
     try:
-        row = conn.execute(
+        return _fetchone(
+            conn,
             """SELECT u.* FROM sessions s
                JOIN users u ON u.id = s.user_id
-               WHERE s.token = ? AND s.expires_at > ?""",
+               WHERE s.token = %s AND s.expires_at > %s""",
             (token, utcnow_iso()),
-        ).fetchone()
-        return _row_to_dict(row)
+        )
     finally:
         close(conn)
 
@@ -202,7 +249,7 @@ def get_user_by_session(token):
 def delete_session(token):
     conn = connect()
     try:
-        conn.execute("DELETE FROM sessions WHERE token = ?", (token,))
+        _execute(conn, "DELETE FROM sessions WHERE token = %s", (token,))
         conn.commit()
     finally:
         close(conn)
@@ -215,8 +262,10 @@ def create_conversation(user_id, title=""):
     try:
         conversation_id = new_id()
         now = utcnow_iso()
-        conn.execute(
-            "INSERT INTO conversations (id, user_id, title, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+        _execute(
+            conn,
+            "INSERT INTO conversations (id, user_id, title, created_at, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s)",
             (conversation_id, user_id, title, now, now),
         )
         conn.commit()
@@ -233,8 +282,7 @@ def create_conversation(user_id, title=""):
 def get_conversation(conversation_id):
     conn = connect()
     try:
-        row = conn.execute("SELECT * FROM conversations WHERE id = ?", (conversation_id,)).fetchone()
-        return _row_to_dict(row)
+        return _fetchone(conn, "SELECT * FROM conversations WHERE id = %s", (conversation_id,))
     finally:
         close(conn)
 
@@ -242,12 +290,12 @@ def get_conversation(conversation_id):
 def list_user_conversations(user_id):
     conn = connect()
     try:
-        rows = conn.execute(
+        return _fetchall(
+            conn,
             "SELECT id, title, created_at, updated_at FROM conversations "
-            "WHERE user_id = ? ORDER BY updated_at DESC",
+            "WHERE user_id = %s ORDER BY updated_at DESC",
             (user_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        )
     finally:
         close(conn)
 
@@ -255,8 +303,9 @@ def list_user_conversations(user_id):
 def update_conversation_title(conversation_id, title):
     conn = connect()
     try:
-        conn.execute(
-            "UPDATE conversations SET title = ?, updated_at = ? WHERE id = ?",
+        _execute(
+            conn,
+            "UPDATE conversations SET title = %s, updated_at = %s WHERE id = %s",
             (title, utcnow_iso(), conversation_id),
         )
         conn.commit()
@@ -267,8 +316,9 @@ def update_conversation_title(conversation_id, title):
 def touch_conversation(conversation_id):
     conn = connect()
     try:
-        conn.execute(
-            "UPDATE conversations SET updated_at = ? WHERE id = ?",
+        _execute(
+            conn,
+            "UPDATE conversations SET updated_at = %s WHERE id = %s",
             (utcnow_iso(), conversation_id),
         )
         conn.commit()
@@ -279,8 +329,8 @@ def touch_conversation(conversation_id):
 def delete_conversation(conversation_id):
     conn = connect()
     try:
-        conn.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
-        conn.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
+        _execute(conn, "DELETE FROM messages WHERE conversation_id = %s", (conversation_id,))
+        _execute(conn, "DELETE FROM conversations WHERE id = %s", (conversation_id,))
         conn.commit()
     finally:
         close(conn)
@@ -291,12 +341,12 @@ def delete_conversation(conversation_id):
 def list_messages(conversation_id):
     conn = connect()
     try:
-        rows = conn.execute(
+        return _fetchall(
+            conn,
             "SELECT id, role, content, published_url, created_at FROM messages "
-            "WHERE conversation_id = ? ORDER BY created_at, rowid",
+            "WHERE conversation_id = %s ORDER BY seq",
             (conversation_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        )
     finally:
         close(conn)
 
@@ -305,9 +355,10 @@ def add_message(conversation_id, role, content, published_url=None):
     conn = connect()
     try:
         message_id = new_id()
-        conn.execute(
+        _execute(
+            conn,
             "INSERT INTO messages (id, conversation_id, role, content, published_url, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
+            "VALUES (%s, %s, %s, %s, %s, %s)",
             (message_id, conversation_id, role, content, published_url, utcnow_iso()),
         )
         conn.commit()
@@ -317,18 +368,19 @@ def add_message(conversation_id, role, content, published_url=None):
 
 
 def truncate_messages_from(conversation_id, keep_count):
-    # Removes every persisted message at or beyond keep_count (in order). Used
-    # when an edit/retry resends a shorter message list so superseded AI replies
-    # don't linger in history.
+    # Removes every persisted message at or beyond keep_count (in insertion
+    # order). Used when an edit/retry resends a shorter message list so
+    # superseded AI replies don't linger in history.
     conn = connect()
     try:
-        rows = conn.execute(
-            "SELECT id FROM messages WHERE conversation_id = ? "
-            "ORDER BY created_at, rowid LIMIT -1 OFFSET ?",
+        stale = _fetchall(
+            conn,
+            "SELECT id FROM messages WHERE conversation_id = %s "
+            "ORDER BY seq OFFSET %s",
             (conversation_id, keep_count),
-        ).fetchall()
-        for r in rows:
-            conn.execute("DELETE FROM messages WHERE id = ?", (r["id"],))
+        )
+        for r in stale:
+            _execute(conn, "DELETE FROM messages WHERE id = %s", (r["id"],))
         conn.commit()
     finally:
         close(conn)
@@ -358,14 +410,14 @@ def sync_messages(conversation_id, submitted):
 def get_message(message_id):
     conn = connect()
     try:
-        row = conn.execute(
+        return _fetchone(
+            conn,
             "SELECT m.id, m.conversation_id, m.role, m.content, m.published_url, "
             "       c.user_id AS user_id "
             "FROM messages m JOIN conversations c ON c.id = m.conversation_id "
-            "WHERE m.id = ?",
+            "WHERE m.id = %s",
             (message_id,),
-        ).fetchone()
-        return _row_to_dict(row)
+        )
     finally:
         close(conn)
 
@@ -373,7 +425,7 @@ def get_message(message_id):
 def attach_published_url(message_id, url):
     conn = connect()
     try:
-        conn.execute("UPDATE messages SET published_url = ? WHERE id = ?", (url, message_id))
+        _execute(conn, "UPDATE messages SET published_url = %s WHERE id = %s", (url, message_id))
         conn.commit()
     finally:
         close(conn)
@@ -384,9 +436,10 @@ def attach_published_url(message_id, url):
 def create_published_site(site_id, user_id, title, size_bytes):
     conn = connect()
     try:
-        conn.execute(
+        _execute(
+            conn,
             "INSERT INTO published_sites (id, user_id, title, size_bytes, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "VALUES (%s, %s, %s, %s, %s)",
             (site_id, user_id, title, size_bytes, utcnow_iso()),
         )
         conn.commit()
@@ -397,8 +450,7 @@ def create_published_site(site_id, user_id, title, size_bytes):
 def get_published_site(site_id):
     conn = connect()
     try:
-        row = conn.execute("SELECT * FROM published_sites WHERE id = ?", (site_id,)).fetchone()
-        return _row_to_dict(row)
+        return _fetchone(conn, "SELECT * FROM published_sites WHERE id = %s", (site_id,))
     finally:
         close(conn)
 
@@ -406,12 +458,12 @@ def get_published_site(site_id):
 def list_user_sites(user_id):
     conn = connect()
     try:
-        rows = conn.execute(
+        return _fetchall(
+            conn,
             "SELECT id, title, size_bytes, created_at FROM published_sites "
-            "WHERE user_id = ? ORDER BY created_at DESC",
+            "WHERE user_id = %s ORDER BY created_at DESC",
             (user_id,),
-        ).fetchall()
-        return [dict(r) for r in rows]
+        )
     finally:
         close(conn)
 
@@ -419,7 +471,53 @@ def list_user_sites(user_id):
 def delete_published_site(site_id):
     conn = connect()
     try:
-        conn.execute("DELETE FROM published_sites WHERE id = ?", (site_id,))
+        _execute(conn, "DELETE FROM published_sites WHERE id = %s", (site_id,))
+        conn.commit()
+    finally:
+        close(conn)
+
+
+# ---- uploaded documents (RAG sources) --------------------------------------
+
+def create_document(document_id, user_id, filename):
+    conn = connect()
+    try:
+        _execute(
+            conn,
+            "INSERT INTO documents (id, user_id, filename, created_at) "
+            "VALUES (%s, %s, %s, %s)",
+            (document_id, user_id, filename, utcnow_iso()),
+        )
+        conn.commit()
+    finally:
+        close(conn)
+
+
+def get_document(document_id):
+    conn = connect()
+    try:
+        return _fetchone(conn, "SELECT * FROM documents WHERE id = %s", (document_id,))
+    finally:
+        close(conn)
+
+
+def list_user_documents(user_id):
+    conn = connect()
+    try:
+        return _fetchall(
+            conn,
+            "SELECT id, filename, created_at FROM documents "
+            "WHERE user_id = %s ORDER BY created_at DESC",
+            (user_id,),
+        )
+    finally:
+        close(conn)
+
+
+def delete_document(document_id):
+    conn = connect()
+    try:
+        _execute(conn, "DELETE FROM documents WHERE id = %s", (document_id,))
         conn.commit()
     finally:
         close(conn)

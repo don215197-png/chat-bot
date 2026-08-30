@@ -7,3 +7,4 @@ __pycache__/
 .env
 *.db
 backend/generated_sites/
+backend/chroma_data/
