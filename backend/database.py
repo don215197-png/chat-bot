@@ -74,6 +74,14 @@ CREATE TABLE IF NOT EXISTS documents (
   created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS user_providers (
+  user_id TEXT PRIMARY KEY REFERENCES users(id),
+  api_url TEXT NOT NULL,
+  api_key TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_conversations_user ON conversations(user_id, updated_at);
 CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id, seq);
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
@@ -156,6 +164,7 @@ def init_db(drop_existing=False):
     try:
         if drop_existing:
             for table in (
+                "user_providers",
                 "published_sites",
                 "documents",
                 "messages",
@@ -518,6 +527,46 @@ def delete_document(document_id):
     conn = connect()
     try:
         _execute(conn, "DELETE FROM documents WHERE id = %s", (document_id,))
+        conn.commit()
+    finally:
+        close(conn)
+
+
+# ---- per-user AI provider (bring-your-own-key) ------------------------------
+
+def get_user_provider(user_id):
+    conn = connect()
+    try:
+        return _fetchone(
+            conn,
+            "SELECT api_url, api_key, model, updated_at FROM user_providers WHERE user_id = %s",
+            (user_id,),
+        )
+    finally:
+        close(conn)
+
+
+def set_user_provider(user_id, api_url, api_key, model):
+    conn = connect()
+    try:
+        _execute(
+            conn,
+            "INSERT INTO user_providers (user_id, api_url, api_key, model, updated_at) "
+            "VALUES (%s, %s, %s, %s, %s) "
+            "ON CONFLICT (user_id) DO UPDATE SET "
+            "api_url = EXCLUDED.api_url, api_key = EXCLUDED.api_key, "
+            "model = EXCLUDED.model, updated_at = EXCLUDED.updated_at",
+            (user_id, api_url, api_key, model, utcnow_iso()),
+        )
+        conn.commit()
+    finally:
+        close(conn)
+
+
+def delete_user_provider(user_id):
+    conn = connect()
+    try:
+        _execute(conn, "DELETE FROM user_providers WHERE user_id = %s", (user_id,))
         conn.commit()
     finally:
         close(conn)

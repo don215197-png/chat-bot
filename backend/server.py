@@ -21,10 +21,13 @@ load_dotenv()
 
 logger = logging.getLogger("chatbot.backend")
 
-OPENCODE_API_URL = "https://opencode.ai/inference/openai/v1/chat/completions"
+OPENCODE_API_URL = os.getenv(
+    "OPENCODE_API_URL", "https://opencode.ai/inference/openai/v1/chat/completions"
+)
 OPENCODE_API_KEY = os.getenv("OPENCODE_API_KEY")
-# Model id for the OpenCode inference endpoint. hy3-free is no longer mapped
-# there ("Model is unavailable"); keep the default on a live free model.
+# Model id for the upstream chat completions endpoint. Defaults to the free
+# OpenCode big-pickle model; override (e.g. to an OpenRouter free model) by
+# setting OPENCODE_MODEL in .env.
 OPENCODE_MODEL = os.getenv("OPENCODE_MODEL", "big-pickle")
 # Load-test seam: MOCK_UPSTREAM=1 makes /chat and /chat/stream answer from an
 # in-process fake provider so a load test measures THIS server's throughput
@@ -32,7 +35,14 @@ OPENCODE_MODEL = os.getenv("OPENCODE_MODEL", "big-pickle")
 # real API calls. Production is unaffected unless explicitly enabled.
 MOCK_UPSTREAM = os.getenv("MOCK_UPSTREAM") == "1"
 
-DEFAULT_ALLOWED_ORIGINS = ["http://localhost:5173", "http://127.0.0.1:5173"]
+DEFAULT_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5174",
+    "http://localhost:5175",
+    "http://127.0.0.1:5175",
+]
 # Extend the allowlist at deploy time without editing code.
 # Comma-separated list, e.g. ALLOWED_ORIGINS=https://myapp.com,https://www.myapp.com
 ALLOWED_ORIGINS = DEFAULT_ALLOWED_ORIGINS + [
@@ -221,10 +231,84 @@ def request_with_retry(func, *args, **kwargs):
     return last_response, last_error
 
 
-def call_openai(payload, headers, stream):
+def call_openai(payload, headers, stream, api_url):
     if MOCK_UPSTREAM:
         return _MockUpstream(payload)
-    return requests.post(OPENCODE_API_URL, json=payload, headers=headers, timeout=(15, 120), stream=stream)
+    return requests.post(api_url, json=payload, headers=headers, timeout=(15, 120), stream=stream)
+
+
+# OpenRouter's :free endpoints are served by volunteer providers and frequently
+# error with transient "Provider returned error" / rate-limit responses. When
+# the configured model fails that way, the whole chat turn is retried against
+# each fallback in order instead of failing the user.
+FALLBACK_MODELS = [
+    "poolside/laguna-s-2.1:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "inclusionai/ling-3.0-flash-fin:free",
+]
+
+
+def is_provider_transient(response):
+    if response.status_code == 429 or response.status_code >= 500:
+        return True
+    err = parse_ai_error(response).lower()
+    return (
+        "provider returned error" in err
+        or "rate limit" in err
+        or "quota" in err
+        or "try again" in err
+        or "model is unavailable" in err
+    )
+
+
+def _allow_provider_fallback(api_url):
+    default_host = urlparse(OPENCODE_API_URL).hostname
+    host = urlparse(api_url).hostname
+    if host == default_host:
+        return True
+    return bool(host and "openrouter" in host)
+
+
+def request_with_model_fallback(payload, headers, stream, api_url):
+    models = [payload.get("model") or OPENCODE_MODEL]
+    # Cross-model fallback only makes sense against the same OpenAI-compatible
+    # endpoint (the local default and OpenRouter both serve the free slugs).
+    # A user's own provider gets one shot at its configured model — guessing
+    # other vendors' model ids against their base URL would just 404.
+    if _allow_provider_fallback(api_url):
+        for m in FALLBACK_MODELS:
+            if m not in models:
+                models.append(m)
+
+    last_response = None
+    last_error = None
+    last_marker = None
+    for model in models:
+        candidate = dict(payload)
+        candidate["model"] = model
+
+        def req():
+            return call_openai(candidate, headers, stream, api_url)
+
+        response, error = request_with_retry(req)
+        if response is not None and response.ok:
+            return response, None
+        if response is not None and not is_provider_transient(response):
+            return response, None
+        if response is None:
+            last_error = error
+            last_marker = "connection failed after retries"
+        else:
+            last_response = response
+            last_marker = f"HTTP {response.status_code} {parse_ai_error(response)}"
+            response.close()
+            logger.warning(
+                "chat upstream: %s on model %s; trying fallback", last_marker, model,
+            )
+    logger.error("chat upstream: all provider models failed; last=%s", last_marker)
+    if last_response is not None:
+        return last_response, None
+    return None, last_error
 
 
 class _MockUpstream:
@@ -250,14 +334,25 @@ class _MockUpstream:
     def close(self):
         pass
 
+def mask_api_key(key):
+    if not key:
+        return ""
+    if len(key) <= 8:
+        return "••••"
+    return f"{key[:4]}••••{key[-4:]}"
+
+
 def parse_ai_error(response: requests.Response) -> str:
     try:
         error_data = response.json()
-        if "error" in error_data:
-            err = error_data["error"]
-            if isinstance(err, dict):
-                return err.get("message", f"AI provider error: {response.status_code}")
-            return str(err)
+        if isinstance(error_data, dict):
+            if "error" in error_data:
+                err = error_data["error"]
+                if isinstance(err, dict):
+                    return err.get("message", "") or err.get("type") or f"AI provider error: {response.status_code}"
+                return str(err)
+            if error_data.get("detail"):
+                return str(error_data["detail"])
     except (ValueError, KeyError):
         pass
     return f"AI provider error: {response.status_code}"
@@ -307,7 +402,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         if not origin:
             return
         self.send_header("Access-Control-Allow-Origin", origin)
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
         self.send_header("Access-Control-Allow-Credentials", "true")
 
@@ -328,6 +423,10 @@ class ChatHandler(BaseHTTPRequestHandler):
     def _require_user(self):
         user = self._get_authenticated_user()
         if user is None:
+            logger.info(
+                "auth rejected: no valid session for %s from %s",
+                self.path, self.client_address[0],
+            )
             self.send_json_response(401, {"detail": "Please log in to continue"})
         return user
 
@@ -350,6 +449,10 @@ class ChatHandler(BaseHTTPRequestHandler):
             user = self._require_user()
             if user:
                 self.handle_list_documents(user)
+        elif path == "/user/provider":
+            user = self._require_user()
+            if user:
+                self.handle_get_provider(user)
         elif path.startswith("/sites/"):
             self.handle_get_site(path[len("/sites/"):])
         elif path.startswith("/documents/"):
@@ -424,6 +527,22 @@ class ChatHandler(BaseHTTPRequestHandler):
             except Exception:
                 pass
 
+    def do_PUT(self):
+        try:
+            parsed_path = urlparse(self.path)
+            path = parsed_path.path
+            if path == "/user/provider":
+                user = self._require_user()
+                if user:
+                    self.handle_set_provider(user)
+            else:
+                self.send_error(404)
+        except Exception as e:
+            try:
+                self.send_json_response(500, {"detail": f"Internal server error: {str(e)}"})
+            except Exception:
+                pass
+
     def do_DELETE(self):
         try:
             parsed_path = urlparse(self.path)
@@ -434,6 +553,10 @@ class ChatHandler(BaseHTTPRequestHandler):
                 self.handle_delete_site(path[len("/sites/"):])
             elif path.startswith("/documents/"):
                 self.handle_delete_document(path[len("/documents/"):])
+            elif path == "/user/provider":
+                user = self._require_user()
+                if user:
+                    self.handle_clear_provider(user)
             else:
                 self.send_error(404)
         except Exception as e:
@@ -491,6 +614,52 @@ class ChatHandler(BaseHTTPRequestHandler):
         if token.strip():
             database.delete_session(token.strip())
         self.send_json_response(200, {"status": "ok"})
+
+    # ---- per-user AI provider (bring-your-own-key) --------------------------
+
+    def handle_get_provider(self, user):
+        provider = database.get_user_provider(user["id"])
+        if provider is None:
+            self.send_json_response(200, {"configured": False})
+            return
+        self.send_json_response(200, {
+            "configured": True,
+            "api_url": provider["api_url"],
+            "model": provider["model"],
+            "has_api_key": bool(provider.get("api_key")),
+            "masked_api_key": mask_api_key(provider.get("api_key", "")),
+        })
+
+    def handle_set_provider(self, user):
+        try:
+            data = self._read_json_body()
+        except Exception:
+            self.send_json_response(400, {"detail": "Invalid JSON body"})
+            return
+        api_url = str(data.get("api_url", "") or "").strip().rstrip("/")
+        model = str(data.get("model", "") or "").strip()
+        api_key = str(data.get("api_key", "") or "").strip()
+        if not api_url or not api_url.startswith(("http://", "https://")):
+            self.send_json_response(400, {"detail": "api_url must be a valid http(s) URL"})
+            return
+        if not model:
+            self.send_json_response(400, {"detail": "model is required"})
+            return
+        database.set_user_provider(user["id"], api_url, api_key, model)
+        logger.info("user %s set custom AI provider (host=%s model=%s key=%s)",
+                    user["id"], urlparse(api_url).hostname, model, "set" if api_key else "none")
+        self.send_json_response(200, {
+            "configured": True,
+            "api_url": api_url,
+            "model": model,
+            "has_api_key": bool(api_key),
+            "masked_api_key": mask_api_key(api_key),
+        })
+
+    def handle_clear_provider(self, user):
+        database.delete_user_provider(user["id"])
+        logger.info("user %s cleared custom AI provider", user["id"])
+        self.send_json_response(200, {"configured": False})
 
     # ---- conversation handlers ---------------------------------------------
 
@@ -804,6 +973,11 @@ class ChatHandler(BaseHTTPRequestHandler):
             self.send_json_response(400, {"detail": error_detail})
             return
 
+        logger.info(
+            "chat request user=%s stream=%s messages=%d conversation_id=%s",
+            user["id"], stream, len(messages), data.get("conversation_id") or "-",
+        )
+
         # Optional conversation binding: when provided the user+assistant turns
         # are persisted under this conversation. The client re-sends its full
         # message list (already loaded from the server), so sync keeps the DB
@@ -840,9 +1014,21 @@ class ChatHandler(BaseHTTPRequestHandler):
                         content = content[idx:]
             cleaned_messages.append({"role": role, "content": content})
 
+        # Bring-your-own-key: a per-user provider (set via /user/provider)
+        # overrides the server-wide OPENCODE_* config for this chat only.
+        user_provider = database.get_user_provider(user["id"])
+        if user_provider:
+            api_url = user_provider["api_url"]
+            api_key = user_provider.get("api_key") or ""
+            model = user_provider.get("model") or OPENCODE_MODEL
+        else:
+            api_url = OPENCODE_API_URL
+            api_key = OPENCODE_API_KEY or ""
+            model = OPENCODE_MODEL
+
         headers = {"Content-Type": "application/json"}
-        if OPENCODE_API_KEY and OPENCODE_API_KEY.strip():
-            headers["Authorization"] = f"Bearer {OPENCODE_API_KEY.strip()}"
+        if api_key.strip():
+            headers["Authorization"] = f"Bearer {api_key.strip()}"
 
         # Optional RAG: when the client asks (use_rag: true), retrieve the
         # user's OWN most relevant document chunks for the latest turn and feed
@@ -890,7 +1076,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         ]
 
         payload = {
-            "model": OPENCODE_MODEL,
+            "model": model,
             "messages": payload_messages,
             "temperature": 0.7,
             "max_tokens": 16384,
@@ -905,13 +1091,15 @@ class ChatHandler(BaseHTTPRequestHandler):
             return None
 
         try:
-            def make_request():
-                return call_openai(payload, headers, stream)
-
-            response, error = request_with_retry(make_request)
+            response, error = request_with_model_fallback(payload, headers, stream, api_url)
 
             if error:
+                logger.error(
+                    "chat upstream: failed to connect after retries (user=%s stream=%s): %s",
+                    user["id"], stream, error,
+                )
                 if stream:
+                    self.start_sse_response()
                     self.send_stream_error(f"Failed to connect to AI provider after retries: {str(error)}")
                 else:
                     self.send_json_response(503, {"detail": f"Failed to connect to AI provider after retries: {str(error)}"})
@@ -919,7 +1107,12 @@ class ChatHandler(BaseHTTPRequestHandler):
 
             if not response.ok:
                 error_detail = parse_ai_error(response)
+                logger.error(
+                    "chat upstream: HTTP %s (user=%s stream=%s): %s",
+                    response.status_code, user["id"], stream, error_detail,
+                )
                 if stream:
+                    self.start_sse_response()
                     self.send_stream_error(error_detail)
                 else:
                     self.send_json_response(502, {"detail": error_detail})
@@ -938,20 +1131,43 @@ class ChatHandler(BaseHTTPRequestHandler):
                     persist_assistant(clean_reasoning_leak(content))
 
         except requests.exceptions.Timeout:
+            logger.error("chat upstream: timed out after retries (user=%s)", user["id"])
             if stream:
+                self.start_sse_response()
                 self.send_stream_error("Request to AI provider timed out after retries")
             else:
                 self.send_json_response(504, {"detail": "Request to AI provider timed out after retries"})
         except requests.exceptions.RequestException as e:
+            logger.error("chat upstream: %s (user=%s)", e, user["id"])
             if stream:
+                self.start_sse_response()
                 self.send_stream_error(f"Failed to connect to AI provider: {str(e)}")
             else:
                 self.send_json_response(503, {"detail": f"Failed to connect to AI provider: {str(e)}"})
         except (KeyError, IndexError, ValueError) as e:
+            logger.error("chat upstream: invalid response format (user=%s): %s", user["id"], e)
             if stream:
+                self.start_sse_response()
                 self.send_stream_error(f"Invalid response format from AI provider: {str(e)}")
             else:
                 self.send_json_response(502, {"detail": f"Invalid response format from AI provider: {str(e)}"})
+
+    def start_sse_response(self):
+        # Send a valid HTTP response head once, then stream SSE frames. Bare
+        # SSE bytes are NOT a valid HTTP response: a connection that closes
+        # without a status line and headers makes fetch() reject the request
+        # ("Could not reach the server") and scripted clients (Invoke-WebRequest)
+        # report "The server committed a protocol violation". Every streaming
+        # path — success or provider error — must open the response head first.
+        if getattr(self, "_sse_headers_sent", False):
+            return
+        self._sse_headers_sent = True
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self._send_cors_headers()
+        self.end_headers()
 
     def handle_stream_response(self, response, persist=None):
         # Streams the upstream SSE through to the client. Returns the assembled
@@ -960,12 +1176,7 @@ class ChatHandler(BaseHTTPRequestHandler):
         # persisted first and its message id is sent as a final SSE frame so the
         # client can attribute later actions (e.g. publishing a generated site)
         # to the exact stored message across reloads.
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-cache")
-        self.send_header("Connection", "close")
-        self._send_cors_headers()
-        self.end_headers()
+        self.start_sse_response()
 
         collected = []
         try:
@@ -977,19 +1188,34 @@ class ChatHandler(BaseHTTPRequestHandler):
                             break
                         try:
                             chunk = json.loads(data)
-                            if chunk.get("choices"):
-                                delta = chunk["choices"][0].get("delta", {})
-                                content = delta.get("content")
-                                reasoning = delta.get("reasoning_content")
-                                if content:
-                                    collected.append(content)
-                                    self.wfile.write(f"data: {json.dumps({'content': content})}\n\n".encode('utf-8'))
-                                    self.wfile.flush()
-                                elif reasoning:
-                                    self.wfile.write(f"data: {json.dumps({'thinking': True})}\n\n".encode('utf-8'))
-                                    self.wfile.flush()
                         except json.JSONDecodeError:
-                            pass
+                            continue
+                        if chunk.get("choices"):
+                            delta = chunk["choices"][0].get("delta", {})
+                            content = delta.get("content")
+                            reasoning = delta.get("reasoning_content")
+                            if content:
+                                collected.append(content)
+                                self.wfile.write(f"data: {json.dumps({'content': content})}\n\n".encode('utf-8'))
+                                self.wfile.flush()
+                            elif reasoning:
+                                self.wfile.write(f"data: {json.dumps({'thinking': True})}\n\n".encode('utf-8'))
+                                self.wfile.flush()
+                        else:
+                            # Some providers answer 200 OK but encode the failure
+                            # as a streamed event ({"type":"error","error":{...}}).
+                            # Surface it as an SSE error frame instead of ending
+                            # the stream as if nothing happened.
+                            err = chunk.get("error")
+                            if err or chunk.get("type") == "error":
+                                if isinstance(err, dict):
+                                    msg = err.get("message") or err.get("type") or "AI provider error"
+                                elif isinstance(err, str):
+                                    msg = err
+                                else:
+                                    msg = "AI provider error"
+                                self.send_stream_error(msg)
+                                break
             # Persist the completed reply before the [DONE] terminator so the
             # message id can ride in the same response.
             assembled = "".join(collected)
@@ -1038,18 +1264,41 @@ class ChatHandler(BaseHTTPRequestHandler):
 class ReusableThreadingServer(ThreadingHTTPServer):
     allow_reuse_address = True
 
+def _is_healthy_on_port(port):
+    """True when a healthy chatbot backend is already serving on `port`.
+
+    Guards against the classic Windows mistake of starting two instances on one
+    port: SO_REUSEADDR lets a second bind "succeed" and the pair then silently
+    shares the port, so a request can land on a stale/broken instance and the
+    client sees a dropped connection. Detect an existing /health instead of
+    binding twice.
+    """
+    try:
+        resp = requests.get(f"http://127.0.0.1:{port}/health", timeout=2)
+        return resp.status_code == 200
+    except requests.exceptions.RequestException:
+        return False
+
 if __name__ == "__main__":
+    logging.basicConfig(
+        level=os.getenv("LOG_LEVEL", "INFO").upper(),
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    )
+    port = int(os.getenv("PORT", "8000"))
+    if _is_healthy_on_port(port):
+        logger.warning(
+            "Another backend instance is already answering on http://127.0.0.1:%s/health - "
+            "refusing to start a duplicate. Stop the other instance (or set PORT to a "
+            "different value) and start again.",
+            port,
+        )
+        raise SystemExit(1)
     database.init_db()
     # Enforce the generated-site retention policy (delete sites older than TTL).
     # Runs once at boot; SITE_TTL_SECONDS (default 7 days) governs how long a
     # published URL stays live.
     cleanup_expired_sites()
     # Bind address is overridable so the backend can sit behind a reverse proxy.
-    port = int(os.getenv("PORT", "8000"))
     server = ReusableThreadingServer(("0.0.0.0", port), ChatHandler)
-    logging.basicConfig(
-        level=os.getenv("LOG_LEVEL", "INFO").upper(),
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    )
     logger.info("Backend server running on http://0.0.0.0:%s", port)
     server.serve_forever()

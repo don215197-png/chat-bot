@@ -1814,3 +1814,214 @@ body {
     max-height: 320px;
   }
 }
+
+/* AI connection ("bring your own key") modal */
+.provider-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s, border-color 0.2s;
+}
+
+.provider-button:hover {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.provider-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+
+.provider-modal {
+  width: min(480px, 100%);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4);
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.provider-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.provider-modal-header h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 1.05rem;
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.provider-close {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  font-size: 1.1rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.provider-close:hover {
+  background: var(--border);
+  color: var(--text-primary);
+}
+
+.provider-hint {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  line-height: 1.45;
+}
+
+.provider-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+}
+
+.provider-field span {
+  color: var(--text-secondary);
+}
+
+.provider-field input {
+  padding: 9px 11px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.9rem;
+  font-family: inherit;
+}
+
+.provider-field input:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.provider-key-hint {
+  font-style: normal;
+  color: var(--success-text);
+  font-size: 0.78rem;
+}
+
+.provider-current {
+  margin: 0;
+  font-size: 0.82rem;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  word-break: break-word;
+}
+
+.provider-host {
+  color: var(--text-primary);
+}
+
+.provider-msg {
+  margin: 0;
+  font-size: 0.85rem;
+  border-radius: 8px;
+  padding: 9px 11px;
+}
+
+.provider-msg.ok {
+  background: var(--success-bg);
+  color: var(--success-text);
+  border: 1px solid rgba(74, 222, 128, 0.4);
+}
+
+.provider-msg.error {
+  background: var(--error-bg);
+  color: var(--error-text);
+  border: 1px solid #662222;
+}
+
+.provider-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.provider-test,
+.provider-clear,
+.provider-save {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 14px;
+  border-radius: 8px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  border: 1px solid var(--border);
+  transition: background 0.2s, color 0.2s, border-color 0.2s;
+}
+
+.provider-test {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+.provider-test:hover:not(:disabled) {
+  background: var(--border);
+}
+
+.provider-clear {
+  background: transparent;
+  color: var(--text-secondary);
+}
+
+.provider-clear:hover:not(:disabled) {
+  color: var(--error-text);
+  border-color: #662222;
+}
+
+.provider-save {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+  margin-left: auto;
+}
+
+.provider-save:hover:not(:disabled) {
+  background: var(--accent-hover);
+}
+
+.provider-test:disabled,
+.provider-clear:disabled,
+.provider-save:disabled {
+  opacity: 0.55;
+  cursor: default;
+}

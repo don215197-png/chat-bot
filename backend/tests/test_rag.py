@@ -137,7 +137,7 @@ class _FakeUpstream:
 
 
 def _passthrough_upstream(monkeypatch, captured):
-    def fake_call(payload, headers, stream):
+    def fake_call(payload, headers, stream, api_url):
         captured["payload"] = payload
         return _FakeUpstream()
 

@@ -73,6 +73,12 @@ function Icon({ name, size = 16, className = '' }) {
       </>
     ),
     moon: <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />,
+    key: (
+      <>
+        <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4" />
+      </>
+    ),
+    plug: <path d="M12 22v-5M9 8V2M15 8V2M18 8v5a4 4 0 0 1-4 4h-4a4 4 0 0 1-4-4V8h12z" />,
     pencil: <path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z" />,
     trash: (
       <>
@@ -662,6 +668,14 @@ function App() {
   // When checked, /chat requests inject the user's uploaded documents as
   // retrieval context (the server embeds the query against their own chunks).
   const [useRag, setUseRag] = useState(false)
+  // Per-user AI connection ("bring your own key"). providerInfo mirrors what
+  // the server stores for THIS user; the key itself is never fetched back —
+  // only a masked hint. providerOpen controls the settings modal.
+  const [providerOpen, setProviderOpen] = useState(false)
+  const [providerForm, setProviderForm] = useState({ apiUrl: '', model: '', apiKey: '' })
+  const [providerInfo, setProviderInfo] = useState({ configured: false, apiUrl: '', model: '', hasApiKey: false, maskedApiKey: '' })
+  const [providerBusy, setProviderBusy] = useState(false)
+  const [providerMsg, setProviderMsg] = useState(null)
   const messagesRef = useRef(null)
   const messagesEndRef = useRef(null)
   const inputRef = useRef(null)
@@ -710,8 +724,12 @@ function App() {
     let res
     try {
       res = await fetch(`${API_URL}${path}`, { ...init, headers })
-    } catch {
-      throw new Error('Could not reach the server')
+    } catch (err) {
+      // A fetch() rejection here means the connection itself failed (backend
+      // down, wrong port, blocked CORS, or an invalid HTTP response head) —
+      // not a server-side application error, so there is no JSON detail to show.
+      if (err && err.name === 'AbortError') throw err
+      throw new Error(`Network error — could not reach the server at ${API_URL}. Is the backend running?`)
     }
     if (res.status === 401 && session?.token) {
       handleLogout()
@@ -719,6 +737,105 @@ function App() {
     }
     return res
   }, [session, handleLogout])
+
+  const refreshProvider = useCallback(async () => {
+    if (!session?.token) return
+    try {
+      const res = await authedFetch('/user/provider')
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.detail || 'Failed to load AI settings')
+      setProviderInfo({
+        configured: !!data.configured,
+        apiUrl: data.api_url || '',
+        model: data.model || '',
+        hasApiKey: !!data.has_api_key,
+        maskedApiKey: data.masked_api_key || '',
+      })
+    } catch {
+      // Settings stay at their defaults; the header just shows the server model.
+    }
+  }, [session, authedFetch])
+
+  useEffect(() => {
+    if (session?.token) refreshProvider()
+  }, [session, refreshProvider])
+
+  const openProviderModal = useCallback(() => {
+    setProviderForm(prev => ({
+      apiUrl: prev.apiUrl || providerInfo.apiUrl,
+      model: prev.model || providerInfo.model,
+      apiKey: '',
+    }))
+    setProviderMsg(null)
+    refreshProvider()
+    setProviderOpen(true)
+  }, [providerInfo, refreshProvider])
+
+  const saveProvider = useCallback(async () => {
+    setProviderBusy(true)
+    setProviderMsg(null)
+    try {
+      const res = await authedFetch('/user/provider', {
+        method: 'PUT',
+        body: JSON.stringify({
+          api_url: providerForm.apiUrl.trim(),
+          model: providerForm.model.trim(),
+          api_key: providerForm.apiKey.trim(),
+        }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.detail || 'Failed to save AI settings')
+      setProviderInfo({
+        configured: true,
+        apiUrl: data.api_url,
+        model: data.model,
+        hasApiKey: data.has_api_key,
+        maskedApiKey: data.masked_api_key,
+      })
+      setProviderForm(f => ({ ...f, apiKey: '' }))
+      setProviderMsg({ kind: 'ok', text: 'Saved. Your messages will now use this connection.' })
+    } catch (err) {
+      setProviderMsg({ kind: 'error', text: err.message })
+    } finally {
+      setProviderBusy(false)
+    }
+  }, [authedFetch, providerForm])
+
+  const clearProvider = useCallback(async () => {
+    if (!window.confirm('Remove your custom AI connection and use the server default?')) return
+    setProviderBusy(true)
+    setProviderMsg(null)
+    try {
+      const res = await authedFetch('/user/provider', { method: 'DELETE' })
+      if (!res.ok) throw new Error('Failed to reset AI settings')
+      setProviderInfo({ configured: false, apiUrl: '', model: '', hasApiKey: false, maskedApiKey: '' })
+      setProviderForm({ apiUrl: '', model: '', apiKey: '' })
+      setProviderMsg({ kind: 'ok', text: 'Using the server default model again.' })
+    } catch (err) {
+      setProviderMsg({ kind: 'error', text: err.message })
+    } finally {
+      setProviderBusy(false)
+    }
+  }, [authedFetch])
+
+  const testProvider = useCallback(async () => {
+    setProviderBusy(true)
+    setProviderMsg(null)
+    try {
+      const res = await authedFetch('/chat', {
+        method: 'POST',
+        body: JSON.stringify({ message: 'Reply with exactly the single word: OK' }),
+      })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.detail || `Request failed (${res.status})`)
+      const reply = String(data.answer || '').trim().replace(/\s+/g, ' ').slice(0, 120)
+      setProviderMsg({ kind: 'ok', text: `Connection works — model replied: ${reply || '(empty)'}` })
+    } catch (err) {
+      setProviderMsg({ kind: 'error', text: err.message })
+    } finally {
+      setProviderBusy(false)
+    }
+  }, [authedFetch])
 
   const refreshConversations = useCallback(async () => {
     if (!session?.token) return
@@ -907,7 +1024,9 @@ function App() {
         if (response.status === 429 && data.retry_after) {
           throw new Error(`Too many requests — try again in ${Math.ceil(data.retry_after / 60)} min.`)
         }
-        throw new Error(data.detail || 'Failed to get response')
+        if (data.detail) throw new Error(data.detail)
+        if (response.status >= 500) throw new Error('Server error — please try again in a moment')
+        throw new Error(`Request failed (${response.status})`)
       }
 
       const reader = response.body.getReader()
@@ -934,6 +1053,9 @@ function App() {
           const lines = block.split('\n')
           for (const line of lines) {
             const trimmedLine = line.trim()
+            // Event-name-only lines carry no payload; the error detail travels
+            // in the following `data:` line and is surfaced below.
+            if (trimmedLine.startsWith('event:')) continue
             if (trimmedLine.startsWith('data: ')) {
               const data = trimmedLine.slice(6).trim()
               if (data === '[DONE]') {
@@ -942,6 +1064,7 @@ function App() {
               }
               try {
                 const parsed = JSON.parse(data)
+                if (parsed.error) throw new Error(typeof parsed.error === 'string' ? parsed.error : (parsed.error.message || 'Stream error'))
                 if (parsed.thinking) {
                   updateMessages(targetId, prev => {
                     const updated = [...prev]
@@ -964,17 +1087,10 @@ function App() {
                 if (parsed.assistant_message_id) {
                   assistantMessageId = parsed.assistant_message_id
                 }
-                if (parsed.error) throw new Error(parsed.error)
               } catch (e) {
                 if (e instanceof SyntaxError) continue
                 throw e
               }
-            } else if (trimmedLine.startsWith('event: error')) {
-              const errorData = trimmedLine.slice(10)
-              try {
-                const parsed = JSON.parse(errorData)
-                if (parsed.data?.error) throw new Error(parsed.data.error)
-              } catch { throw new Error('Stream error') }
             }
           }
         }
@@ -1429,10 +1545,19 @@ function App() {
                 aria-label={isOnline ? 'Online' : 'Offline'}
               />
             </h1>
-            <p>Powered by big-pickle</p>
+            <p>Powered by {providerInfo.configured ? providerInfo.model : 'big-pickle'}</p>
           </div>
         </div>
         <div className="header-actions">
+          <button
+            type="button"
+            className="provider-button"
+            onClick={openProviderModal}
+            aria-label="AI connection settings"
+            title="AI connection"
+          >
+            <Icon name="key" size={17} />
+          </button>
           <div className="account-chip" title={`Signed in as ${session?.email}`}>
             <span className="account-email">{session?.email}</span>
           </div>
@@ -1710,6 +1835,98 @@ function App() {
           </form>
         </main>
       </div>
+
+      {providerOpen && (
+        <div className="provider-overlay" onClick={() => setProviderOpen(false)} role="presentation">
+          <div className="provider-modal" role="dialog" aria-modal="true" aria-label="AI connection" onClick={(e) => e.stopPropagation()}>
+            <div className="provider-modal-header">
+              <h2><Icon name="key" size={16} /> AI connection</h2>
+              <button type="button" className="provider-close" onClick={() => setProviderOpen(false)} aria-label="Close">
+                ×
+              </button>
+            </div>
+
+            <p className="provider-hint">
+              Bring your own API for this account (OpenAI-compatible endpoint). Leave this untouched to keep
+              using the server default model ({providerInfo.configured ? providerInfo.model : 'big-pickle'}).
+              Your key is stored on the server and never shown back.
+            </p>
+
+            <label className="provider-field">
+              <span>Base URL</span>
+              <input
+                type="text"
+                value={providerForm.apiUrl}
+                onChange={(e) => setProviderForm(f => ({ ...f, apiUrl: e.target.value }))}
+                placeholder="https://openrouter.ai/api/v1/chat/completions"
+                spellCheck="false"
+                autoComplete="off"
+              />
+            </label>
+
+            <label className="provider-field">
+              <span>Model</span>
+              <input
+                type="text"
+                value={providerForm.model}
+                onChange={(e) => setProviderForm(f => ({ ...f, model: e.target.value }))}
+                placeholder="poolside/laguna-s-2.1:free"
+                spellCheck="false"
+                autoComplete="off"
+              />
+            </label>
+
+            <label className="provider-field">
+              <span>API key {providerInfo.hasApiKey && <em className="provider-key-hint">(saved {providerInfo.maskedApiKey})</em>}</span>
+              <input
+                type="password"
+                value={providerForm.apiKey}
+                onChange={(e) => setProviderForm(f => ({ ...f, apiKey: e.target.value }))}
+                placeholder={providerInfo.hasApiKey ? 'Leave blank to keep the saved key' : 'sk-… (optional for free models)'}
+                autoComplete="new-password"
+              />
+            </label>
+
+            {providerInfo.configured && (
+              <p className="provider-current">
+                Currently using <strong>{providerInfo.model}</strong> via{' '}
+                <span className="provider-host">{providerInfo.apiUrl}</span>
+                {providerInfo.hasApiKey ? ' — your key' : ' — no key (free model)'}.
+              </p>
+            )}
+
+            {providerMsg && (
+              <p className={`provider-msg ${providerMsg.kind}`} role={providerMsg.kind === 'error' ? 'alert' : 'status'}>
+                {providerMsg.text}
+              </p>
+            )}
+
+            <div className="provider-actions">
+              <button
+                type="button"
+                className="provider-test"
+                onClick={testProvider}
+                disabled={providerBusy}
+              >
+                <Icon name="plug" size={14} /> {providerBusy ? 'Testing…' : 'Test connection'}
+              </button>
+              {providerInfo.configured && (
+                <button type="button" className="provider-clear" onClick={clearProvider} disabled={providerBusy}>
+                  Use server default
+                </button>
+              )}
+              <button
+                type="button"
+                className="provider-save"
+                onClick={saveProvider}
+                disabled={providerBusy || !providerForm.apiUrl.trim() || !providerForm.model.trim()}
+              >
+                Save
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
